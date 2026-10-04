@@ -18,6 +18,10 @@ const DonorsPage = lazy(() => import('@/features/donors/DonorsPage'));
 const DonorProfilePage = lazy(() => import('@/features/donors/DonorProfilePage'));
 const WhatsAppSettingsPage = lazy(() => import('@/features/whatsapp/WhatsAppSettingsPage'));
 const WhatsAppInboxPage = lazy(() => import('@/features/whatsapp/inbox/WhatsAppInboxPage'));
+const BroadcastsPage = lazy(() => import('@/features/whatsapp/broadcast/BroadcastsPage'));
+const BroadcastWizardPage = lazy(() => import('@/features/whatsapp/broadcast/BroadcastWizardPage'));
+const BroadcastDetailPage = lazy(() => import('@/features/whatsapp/broadcast/BroadcastDetailPage'));
+const TemplatesPage = lazy(() => import('@/features/whatsapp/TemplatesPage'));
 const PurchasesPage = lazy(() => import('@/features/purchases/PurchasesPage'));
 const BankingPage = lazy(() => import('@/features/banking/BankingPage'));
 const SettingsPage = lazy(() => import('@/features/settings/SettingsPage'));
@@ -79,6 +83,16 @@ export default function App() {
 
           <Route element={<RequirePermission permission="whatsapp.inbox" />}>
             <Route path="/whatsapp" element={<WhatsAppInboxPage />} />
+          </Route>
+
+          <Route element={<RequirePermission permission="whatsapp.send" />}>
+            <Route path="/whatsapp/broadcasts" element={<BroadcastsPage />} />
+            <Route path="/whatsapp/broadcasts/new" element={<BroadcastWizardPage />} />
+            <Route path="/whatsapp/broadcasts/:id" element={<BroadcastDetailPage />} />
+          </Route>
+
+          <Route element={<RequirePermission permission="whatsapp.manage" />}>
+            <Route path="/whatsapp/templates" element={<TemplatesPage />} />
           </Route>
 
           <Route element={<RequirePermission permission="purchase.view" />}>

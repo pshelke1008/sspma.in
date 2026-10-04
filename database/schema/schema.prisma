@@ -144,6 +144,7 @@ enum WhatsAppBroadcastStatus {
   RUNNING
   COMPLETED
   CANCELLED
+  SCHEDULED
 }
 
 enum AttachmentKind {
@@ -1061,8 +1062,21 @@ model WhatsAppBroadcast {
   status           WhatsAppBroadcastStatus @default(QUEUED)
   totalRecipients  Int                     @default(0)
   sentCount        Int                     @default(0)
+  deliveredCount   Int                     @default(0)
+  readCount        Int                     @default(0)
   failedCount      Int                     @default(0)
   skippedCount     Int                     @default(0)
+  /// Broadcast wizard: when it is due (SCHEDULED), how recipients were chosen
+  /// (ALL, FILTER, SELECT, UPLOAD), how template variables are filled, the
+  /// approved template's category, a rough cost, and the template's media header.
+  scheduledAt      DateTime?
+  audienceMode     String?
+  variableMapping  Json?
+  templateCategory String?
+  estimatedCost    Decimal?                @db.Decimal(10, 2)
+  headerFormat     String?
+  headerMediaId    String?
+  headerMediaName  String?
   createdById      String
   createdAt        DateTime                @default(now())
   startedAt        DateTime?
@@ -1074,6 +1088,7 @@ model WhatsAppBroadcast {
 
   @@index([organizationId, createdAt])
   @@index([status])
+  @@index([status, scheduledAt])
 }
 
 model WhatsAppMessage {
@@ -1088,6 +1103,8 @@ model WhatsAppMessage {
   phone             String
   body              String?
   templateName      String?
+  /// The values this recipient's template send was filled with (wizard broadcasts).
+  templateParams    String[]              @default([])
   /// The sender's WhatsApp profile name, for contacts who are not donors yet.
   contactName       String?
   /// image | document | audio | video | sticker — with the file kept in storage.
@@ -1100,6 +1117,8 @@ model WhatsAppMessage {
   status            WhatsAppMessageStatus @default(QUEUED)
   providerMessageId String?
   error             String?
+  /// Meta's own explanation of a failure (code and details), kept for the people fixing it.
+  errorDetail       String?
   sentById          String?
   sentAt            DateTime?
   deliveredAt       DateTime?

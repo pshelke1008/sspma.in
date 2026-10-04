@@ -6,8 +6,10 @@
  * a broadcast interrupted by a restart resumes from the rows still QUEUED.
  */
 import type { Request } from 'express';
+import type { BroadcastDonorField } from '@ashram/types';
 import type { Prisma, WhatsAppMessageStatus, WhatsAppProvider } from '@prisma/client';
 import { prisma } from '../../db';
+import { env } from '../../env';
 import { notFound } from '../../lib/errors';
 import { AUDIT_ACTIONS, recordAudit } from '../../lib/audit';
 import type { AuthContext } from '../../middleware/auth';
@@ -15,9 +17,19 @@ import { messagingNumber, statsFor } from '../donors/donor.service';
 import * as cloud from './cloudApi';
 import * as manager from './connectionManager';
 import { cloudCredentials, getOrCreateChannel, reserveWebSend, resolveSender } from './channel.service';
-import { WhatsAppError, WhatsAppErrorCode, sanitizeError, type WhatsAppErrorCodeValue } from './errors';
+import {
+  WhatsAppError,
+  WhatsAppErrorCode,
+  codeForMetaError,
+  failureOf,
+  metaErrorDetail,
+  sanitizeError,
+  type WhatsAppErrorCodeValue,
+} from './errors';
 import { normalizePhone } from './phone';
 import { findByPhoneNumberId } from './numbers.service';
+import { requireUsable } from './template.service';
+import { renderTemplateText } from './templates';
 import { fetchInboundMedia } from './media.service';
 import { findDonorByPhone } from './link';
 
@@ -28,7 +40,7 @@ export interface MessageContent {
   templateParams?: string[];
 }
 
-type DonorForMessaging = {
+export type DonorForMessaging = {
   id: string;
   name: string;
   isActive: boolean;
@@ -36,16 +48,29 @@ type DonorForMessaging = {
   phone: string | null;
   whatsappNumber: string | null;
   preferredLanguage: string;
+  code?: string;
+  village?: string | null;
+  district?: string | null;
+  state?: string | null;
 };
 
 // ----------------------------- Personalisation --------------------------------
 
-interface RenderContext {
-  name: string;
-  total_donated: string;
-  last_donation_date: string;
-  organization: string;
-}
+/** Every donor detail a message or template variable can be filled from. */
+export type RenderContext = Record<BroadcastDonorField, string>;
+
+/** For a contact who is not a donor: only their name is known. */
+export const contactContext = (name: string): RenderContext => ({
+  name,
+  code: '',
+  phone: '',
+  village: '',
+  district: '',
+  state: '',
+  total_donated: '',
+  last_donation_date: '',
+  organization: '',
+});
 
 export async function contextsFor(organizationId: string, donors: DonorForMessaging[]): Promise<Map<string, RenderContext>> {
   const [stats, organization] = await Promise.all([
@@ -62,6 +87,11 @@ export async function contextsFor(organizationId: string, donors: DonorForMessag
         donor.id,
         {
           name: donor.name,
+          code: donor.code ?? '',
+          phone: messagingNumber(donor) ?? '',
+          village: donor.village ?? '',
+          district: donor.district ?? '',
+          state: donor.state ?? '',
           total_donated: `₹${new Intl.NumberFormat('en-IN').format(donorStats?.totalDonated ?? 0)}`,
           last_donation_date: donorStats?.lastDonationAt
             ? new Intl.DateTimeFormat(locale, { day: 'numeric', month: 'long', year: 'numeric' }).format(
@@ -115,7 +145,13 @@ export async function deliver(
   organizationId: string,
   provider: WhatsAppProvider,
   phone: string,
-  content: { body: string | null; templateName: string | null; templateLanguage: string | null; templateParams: string[] },
+  content: {
+    body: string | null;
+    templateName: string | null;
+    templateLanguage: string | null;
+    templateParams: string[];
+    headerMedia?: { kind: 'image' | 'video' | 'document'; mediaId: string; fileName?: string | null } | null;
+  },
   numberId?: string | null,
 ): Promise<{ providerMessageId: string; numberId: string | null }> {
   if (provider === 'WEB_QR') {
@@ -142,6 +178,7 @@ export async function deliver(
         name: content.templateName,
         language: content.templateLanguage ?? 'en',
         bodyParams: content.templateParams,
+        headerMedia: content.headerMedia,
       })
     : await cloud.sendText(credentials.phoneNumberId, credentials.token, phone, content.body ?? '');
   return { providerMessageId, numberId: credentials.numberId };
@@ -166,6 +203,9 @@ export async function sendToDonor(auth: AuthContext, donorId: string, content: M
   const context = (await contextsFor(auth.organizationId, [donor])).get(donor.id)!;
   const body = content.body ? render(content.body, context) : null;
   const templateParams = (content.templateParams ?? []).map((param) => render(param, context));
+  const template = content.templateName
+    ? await requireUsable(auth.organizationId, content.templateName, content.templateLanguage, templateParams)
+    : null;
 
   const message = await prisma.whatsAppMessage.create({
     data: {
@@ -174,7 +214,7 @@ export async function sendToDonor(auth: AuthContext, donorId: string, content: M
       direction: 'OUTBOUND',
       provider,
       phone,
-      body: content.templateName ? templateSummary(content.templateName, templateParams) : body,
+      body: template ? renderTemplateText(template.bodyText, templateParams) : body,
       templateName: content.templateName ?? null,
       status: 'QUEUED',
       sentById: auth.userId,
@@ -213,7 +253,7 @@ export async function sendToDonor(auth: AuthContext, donorId: string, content: M
   } catch (error) {
     await prisma.whatsAppMessage.update({
       where: { id: message.id },
-      data: { status: 'FAILED', error: sanitizeError(error) },
+      data: { status: 'FAILED', ...failureOf(error) },
     });
     throw error;
   }
@@ -235,14 +275,22 @@ export async function previewBroadcast(organizationId: string, donorIds: string[
     return result === 'OK';
   });
 
+  // Fail the review step, not every recipient: a missing or half-filled template is caught here.
+  const template =
+    content.templateName && provider === 'CLOUD_API'
+      ? await requireUsable(organizationId, content.templateName, content.templateLanguage, content.templateParams ?? [])
+      : null;
+
   const sampleDonor = eligible[0] ?? donors[0];
   let sample: { donorName: string; body: string | null; templateParams: string[] } | null = null;
   if (sampleDonor) {
     const context = (await contextsFor(organizationId, [sampleDonor])).get(sampleDonor.id)!;
+    const templateParams = (content.templateParams ?? []).map((param) => render(param, context));
     sample = {
       donorName: sampleDonor.name,
-      body: content.body ? render(content.body, context) : null,
-      templateParams: (content.templateParams ?? []).map((param) => render(param, context)),
+      // For a template, the approved text with this donor's values filled in.
+      body: template ? renderTemplateText(template.bodyText, templateParams) : content.body ? render(content.body, context) : null,
+      templateParams,
     };
   }
 
@@ -270,6 +318,10 @@ export async function createBroadcast(
 ) {
   const provider = await resolveSender(auth.organizationId);
   assertContentFits(provider, input);
+  // Placeholders like {{name}} are filled per donor later; here only the shape is checked.
+  const template = input.templateName
+    ? await requireUsable(auth.organizationId, input.templateName, input.templateLanguage, input.templateParams ?? [])
+    : null;
 
   const donors = await prisma.donor.findMany({
     where: { organizationId: auth.organizationId, id: { in: input.donorIds } },
@@ -298,9 +350,10 @@ export async function createBroadcast(
         organizationId: auth.organizationId,
         name: input.name,
         provider,
-        body: input.body ?? null,
+        // For a template, the approved text as it was when the broadcast was made.
+        body: template?.bodyText ?? input.body ?? null,
         templateName: input.templateName ?? null,
-        templateLanguage: input.templateLanguage ?? null,
+        templateLanguage: template?.language ?? input.templateLanguage ?? null,
         templateParams: input.templateParams ?? [],
         totalRecipients: rows.length,
         skippedCount,
@@ -336,6 +389,10 @@ const HALTING = new Set<string>([
   WhatsAppErrorCode.MONTHLY_LIMIT,
   WhatsAppErrorCode.CLOUD_AUTH_FAILED,
   WhatsAppErrorCode.TEMPLATE_NOT_FOUND,
+  WhatsAppErrorCode.TEMPLATE_PAUSED,
+  WhatsAppErrorCode.PAYMENT_ISSUE,
+  WhatsAppErrorCode.ACCOUNT_RESTRICTED,
+  WhatsAppErrorCode.DISPLAY_NAME_PENDING,
 ]);
 
 async function recount(broadcastId: string) {
@@ -350,6 +407,8 @@ async function recount(broadcastId: string) {
     where: { id: broadcastId },
     data: {
       sentCount: count(['SENT', 'DELIVERED', 'READ']),
+      deliveredCount: count(['DELIVERED', 'READ']),
+      readCount: count(['READ']),
       failedCount: count(['FAILED']),
       skippedCount: count(['SKIPPED']),
     },
@@ -362,7 +421,8 @@ export async function runBroadcast(broadcastId: string): Promise<void> {
 
   try {
     const broadcast = await prisma.whatsAppBroadcast.findUnique({ where: { id: broadcastId } });
-    if (!broadcast || broadcast.status === 'CANCELLED' || broadcast.status === 'COMPLETED') return;
+    // A SCHEDULED broadcast waits for the scheduler; it must not start early.
+    if (!broadcast || ['CANCELLED', 'COMPLETED', 'SCHEDULED'].includes(broadcast.status)) return;
 
     await prisma.whatsAppBroadcast.update({
       where: { id: broadcastId },
@@ -384,13 +444,28 @@ export async function runBroadcast(broadcastId: string): Promise<void> {
         if (!message.donor) throw new WhatsAppError(WhatsAppErrorCode.INVALID_NUMBER);
         const context = (await contextsFor(broadcast.organizationId, [message.donor])).get(message.donor.id)!;
         const body = broadcast.body ? render(broadcast.body, context) : null;
-        const templateParams = broadcast.templateParams.map((param) => render(param, context));
+        // Wizard broadcasts store each recipient's finished values; older ones render shared placeholders here.
+        const templateParams = message.templateParams.length
+          ? message.templateParams
+          : broadcast.templateParams.map((param) => render(param, context));
+        // Meta refuses an empty variable; fail this one donor clearly instead of sending nothing useful.
+        if (broadcast.templateName && templateParams.some((param) => !param.trim())) {
+          throw new WhatsAppError(WhatsAppErrorCode.TEMPLATE_PARAMS_MISMATCH);
+        }
 
         const delivered = await deliver(broadcast.organizationId, broadcast.provider, message.phone, {
           body,
           templateName: broadcast.templateName,
           templateLanguage: broadcast.templateLanguage,
           templateParams,
+          headerMedia:
+            broadcast.headerFormat && broadcast.headerMediaId
+              ? {
+                  kind: broadcast.headerFormat.toLowerCase() as 'image' | 'video' | 'document',
+                  mediaId: broadcast.headerMediaId,
+                  fileName: broadcast.headerMediaName,
+                }
+              : null,
         });
 
         await prisma.whatsAppMessage.update({
@@ -400,18 +475,22 @@ export async function runBroadcast(broadcastId: string): Promise<void> {
             providerMessageId: delivered.providerMessageId || null,
             whatsappNumberId: delivered.numberId,
             sentAt: new Date(),
-            body: broadcast.templateName ? templateSummary(broadcast.templateName, templateParams) : body,
+            body: broadcast.templateName
+              ? broadcast.body
+                ? renderTemplateText(broadcast.body, templateParams)
+                : templateSummary(broadcast.templateName, templateParams)
+              : body,
           },
         });
       } catch (error) {
-        const code = sanitizeError(error);
-        await prisma.whatsAppMessage.update({ where: { id: message.id }, data: { status: 'FAILED', error: code } });
+        const { error: code, errorDetail } = failureOf(error);
+        await prisma.whatsAppMessage.update({ where: { id: message.id }, data: { status: 'FAILED', error: code, errorDetail } });
 
         if (HALTING.has(code)) {
           // No point trying the rest: record why, once, on every remaining row.
           await prisma.whatsAppMessage.updateMany({
             where: { broadcastId, status: 'QUEUED' },
-            data: { status: 'FAILED', error: code },
+            data: { status: 'FAILED', error: code, errorDetail },
           });
           break;
         }
@@ -469,6 +548,38 @@ export function resumeBroadcasts(delayMs = 30_000): void {
   }, delayMs).unref();
 }
 
+/**
+ * Starts SCHEDULED broadcasts when they fall due. Claiming a row with a
+ * conditional update means a broadcast can only be started once, however the
+ * timer and a restart interleave. Single-instance, like the rest of this module.
+ */
+export async function startDueBroadcasts(now = new Date()): Promise<number> {
+  const due = await prisma.whatsAppBroadcast.findMany({
+    where: { status: 'SCHEDULED', scheduledAt: { lte: now } },
+    select: { id: true },
+  });
+  let started = 0;
+  for (const { id } of due) {
+    const claimed = await prisma.whatsAppBroadcast.updateMany({
+      where: { id, status: 'SCHEDULED' },
+      data: { status: 'QUEUED' },
+    });
+    if (claimed.count === 1) {
+      started += 1;
+      void runBroadcast(id);
+    }
+  }
+  return started;
+}
+
+export function startBroadcastScheduler(): NodeJS.Timeout {
+  const timer = setInterval(() => {
+    startDueBroadcasts().catch((error) => console.error('[whatsapp] scheduler failed', sanitizeError(error)));
+  }, env.whatsapp.schedulerIntervalMs);
+  timer.unref();
+  return timer;
+}
+
 export async function listBroadcasts(organizationId: string) {
   return prisma.whatsAppBroadcast.findMany({
     where: { organizationId },
@@ -476,6 +587,39 @@ export async function listBroadcasts(organizationId: string) {
     take: 50,
     include: { createdBy: { select: { id: true, name: true } } },
   });
+}
+
+/** One page of a broadcast's recipients, optionally only those in a given state. */
+export async function listBroadcastMessages(
+  organizationId: string,
+  broadcastId: string,
+  query: { status?: WhatsAppMessageStatus; page: number; pageSize: number },
+) {
+  const broadcast = await prisma.whatsAppBroadcast.findFirst({ where: { id: broadcastId, organizationId }, select: { id: true } });
+  if (!broadcast) throw notFound('Broadcast not found');
+
+  const where = { broadcastId, ...(query.status ? { status: query.status } : {}) };
+  const [total, rows] = await Promise.all([
+    prisma.whatsAppMessage.count({ where }),
+    prisma.whatsAppMessage.findMany({
+      where,
+      orderBy: [{ sentAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'asc' }],
+      skip: (query.page - 1) * query.pageSize,
+      take: query.pageSize,
+      select: {
+        id: true,
+        phone: true,
+        status: true,
+        error: true,
+        errorDetail: true,
+        sentAt: true,
+        deliveredAt: true,
+        readAt: true,
+        donor: { select: { id: true, name: true, code: true } },
+      },
+    }),
+  ]);
+  return { data: rows, meta: { page: query.page, pageSize: query.pageSize, total, totalPages: Math.max(1, Math.ceil(total / query.pageSize)) } };
 }
 
 export async function getBroadcast(organizationId: string, broadcastId: string, options: { summary?: boolean } = {}) {
@@ -532,7 +676,7 @@ async function applyReceipt(
   organizationId: string,
   providerMessageId: string,
   status: 'SENT' | 'DELIVERED' | 'READ' | 'FAILED',
-  error?: string,
+  failure?: { error: string; errorDetail: string | null },
 ) {
   const message = await prisma.whatsAppMessage.findFirst({
     where: { organizationId, providerMessageId },
@@ -543,7 +687,7 @@ async function applyReceipt(
   if (status === 'FAILED') {
     await prisma.whatsAppMessage.update({
       where: { id: message.id },
-      data: { status: 'FAILED', error: error ?? WhatsAppErrorCode.SEND_FAILED },
+      data: { status: 'FAILED', error: failure?.error ?? WhatsAppErrorCode.SEND_FAILED, errorDetail: failure?.errorDetail ?? null },
     });
   } else if ((STATUS_RANK[status] ?? 0) > (STATUS_RANK[message.status] ?? -1)) {
     // Receipts can arrive out of order; never move a message backwards.
@@ -633,7 +777,11 @@ interface CloudWebhookPayload {
       value?: {
         metadata?: { phone_number_id?: string };
         contacts?: { wa_id?: string; profile?: { name?: string } }[];
-        statuses?: { id: string; status: string; errors?: { code?: number }[] }[];
+        statuses?: {
+          id: string;
+          status: string;
+          errors?: { code?: number; title?: string; message?: string; error_data?: { details?: string } }[];
+        }[];
         messages?: {
           id: string;
           from: string;
@@ -677,14 +825,13 @@ export async function processCloudWebhook(payload: CloudWebhookPayload) {
                   ? 'SENT'
                   : null;
         if (!mapped) continue;
-        const code = status.errors?.[0]?.code;
-        const error =
-          code === 131047
-            ? WhatsAppErrorCode.OUTSIDE_WINDOW
-            : code === 131026
-              ? WhatsAppErrorCode.NOT_ON_WHATSAPP
-              : WhatsAppErrorCode.SEND_FAILED;
-        await applyReceipt(number.organizationId, status.id, mapped, mapped === 'FAILED' ? error : undefined);
+        // A failed receipt names the reason (billing, quota, media …); keep both our summary and Meta's words.
+        const reason = status.errors?.[0];
+        const failure = {
+          error: codeForMetaError(reason?.code),
+          errorDetail: metaErrorDetail(reason && { code: reason.code, title: reason.title, message: reason.message, details: reason.error_data?.details }),
+        };
+        await applyReceipt(number.organizationId, status.id, mapped, mapped === 'FAILED' ? failure : undefined);
       }
 
       const names = new Map((value.contacts ?? []).map((contact) => [contact.wa_id ?? '', contact.profile?.name ?? null]));

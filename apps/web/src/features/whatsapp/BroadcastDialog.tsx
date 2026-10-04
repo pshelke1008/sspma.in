@@ -23,7 +23,7 @@ import {
   type Broadcast,
   type BroadcastPreview,
 } from './api';
-import { EMPTY_COMPOSER, MessageComposer, hasContent, toContent, type ComposerState } from './MessageComposer';
+import { EMPTY_COMPOSER, MessageComposer, contentError, toContent, type ComposerState } from './MessageComposer';
 
 type Stage = 'compose' | 'review' | 'progress';
 
@@ -110,9 +110,8 @@ export function BroadcastDialog({
   function review() {
     const next: typeof errors = {};
     if (name.trim().length < 2) next.name = 'whatsapp.nameRequired';
-    if (!hasContent(composer, provider)) {
-      next.content = composer.mode === 'template' && provider === 'CLOUD_API' ? 'whatsapp.chooseTemplate' : 'whatsapp.messageRequired';
-    }
+    const problem = contentError(composer, provider);
+    if (problem) next.content = problem;
     setErrors(next);
     if (Object.keys(next).length === 0) previewMutation.mutate();
   }

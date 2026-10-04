@@ -20,15 +20,15 @@ export const SheetContent = React.forwardRef<
   }
 >(({ className, children, side = 'right', width = 'sm:max-w-md', ...props }, ref) => (
   <DialogPrimitive.Portal>
-    <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-ink/40 backdrop-blur-[2px] data-[state=open]:animate-fade-in" />
+    <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-ink/40 backdrop-blur-[2px] data-[state=open]:animate-fade-in data-[state=closed]:animate-fade-out" />
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
         'fixed z-50 flex flex-col bg-white shadow-pop',
-        side === 'right' && `inset-y-0 right-0 w-full ${width} border-l border-line data-[state=open]:animate-slide-in-right`,
+        side === 'right' && `inset-y-0 right-0 w-full ${width} border-l border-line data-[state=open]:animate-slide-in-right data-[state=closed]:animate-slide-out-right`,
         side === 'left' && `inset-y-0 left-0 w-full ${width} border-r border-line`,
         side === 'bottom' &&
-          'inset-x-0 bottom-0 max-h-[88vh] rounded-t-2xl border-t border-line data-[state=open]:animate-slide-up',
+          'inset-x-0 bottom-0 max-h-[88vh] rounded-t-2xl border-t border-line data-[state=open]:animate-slide-up data-[state=closed]:animate-slide-down',
         className,
       )}
       {...props}

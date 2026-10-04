@@ -7,6 +7,7 @@ import { SegmentedControl } from '@/components/common/SegmentedControl';
 import { Input, Textarea } from '@/components/ui/input';
 import { SimpleSelect } from '@/components/ui/select';
 import { useTemplates, type MessageContent } from './api';
+import { TemplatePreview } from './TemplatePreview';
 
 export type ComposerMode = 'text' | 'template';
 
@@ -36,7 +37,17 @@ export function toContent(state: ComposerState, provider: WhatsAppProviderKey | 
 }
 
 export function hasContent(state: ComposerState, provider: WhatsAppProviderKey | null): boolean {
-  return effectiveMode(state, provider) === 'template' ? Boolean(state.templateKey) : Boolean(state.body.trim());
+  // A template needs every variable filled in; Meta refuses a send with a blank one.
+  return effectiveMode(state, provider) === 'template'
+    ? Boolean(state.templateKey) && state.templateParams.every((param) => param.trim())
+    : Boolean(state.body.trim());
+}
+
+/** Why the message is not ready to send, as a translation key — or nothing if it is. */
+export function contentError(state: ComposerState, provider: WhatsAppProviderKey | null): string | undefined {
+  if (hasContent(state, provider)) return undefined;
+  if (effectiveMode(state, provider) === 'template') return state.templateKey ? 'whatsapp.fillVariables' : 'whatsapp.chooseTemplate';
+  return 'whatsapp.messageRequired';
 }
 
 /**
@@ -145,7 +156,13 @@ export function MessageComposer({
             htmlFor={`${idPrefix}-template`}
             required
             error={error}
-            hint={!templatesLoading && !templates?.data.length ? t('whatsapp.noTemplates') : undefined}
+            hint={
+              !templatesLoading && !templates?.data.length
+                ? t('whatsapp.noTemplates')
+                : templates?.hidden
+                  ? t('whatsapp.templatesHidden', { count: templates.hidden })
+                  : undefined
+            }
           >
             <SimpleSelect
               value={value.templateKey || undefined}
@@ -156,7 +173,7 @@ export function MessageComposer({
               options={(templates?.data ?? []).map((item) => ({
                 value: `${item.name}|${item.language}`,
                 label: item.name,
-                hint: item.language,
+                hint: `${item.language} · ${t(`whatsapp.templates.category.${item.category}`, { defaultValue: item.category })}`,
               }))}
               placeholder={templatesLoading ? t('common.loading') : t('whatsapp.chooseTemplate')}
               invalid={Boolean(error)}
@@ -166,9 +183,13 @@ export function MessageComposer({
 
           {selectedTemplate && (
             <>
-              <blockquote className="whitespace-pre-wrap rounded-control border border-line bg-canvas/60 px-3 py-2 text-[12.5px] text-ink">
-                {selectedTemplate.bodyText}
-              </blockquote>
+              <TemplatePreview
+                headerText={selectedTemplate.headerText}
+                bodyText={selectedTemplate.bodyText}
+                footerText={selectedTemplate.footerText}
+                buttons={selectedTemplate.buttons}
+                values={value.templateParams}
+              />
               {value.templateParams.map((param, index) => (
                 <FormField
                   key={index}

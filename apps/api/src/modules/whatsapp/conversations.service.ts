@@ -21,9 +21,9 @@ import { storeFile, validateUpload } from '../../lib/storage';
 import type { AuthContext } from '../../middleware/auth';
 import * as cloud from './cloudApi';
 import { cloudCredentials, resolveSender } from './channel.service';
-import { WhatsAppError, WhatsAppErrorCode, sanitizeError } from './errors';
+import { WhatsAppError, WhatsAppErrorCode, failureOf, sanitizeError } from './errors';
 import { findDonorByPhone } from './link';
-import { assertContentFits, contextsFor, deliver, render, templateSummary, type MessageContent } from './messaging.service';
+import { assertContentFits, contactContext, contextsFor, deliver, render, templateSummary, type MessageContent } from './messaging.service';
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -173,6 +173,7 @@ const MESSAGE_SELECT = {
   mediaStorageKey: true,
   status: true,
   error: true,
+  errorDetail: true,
   broadcastId: true,
   whatsappNumberId: true,
   sentAt: true,
@@ -235,7 +236,7 @@ export async function sendInConversation(
   if (provider === 'CLOUD_API' && needsTemplate) throw new WhatsAppError(WhatsAppErrorCode.OUTSIDE_WINDOW);
 
   // Placeholders work for donors; for an unknown contact {{name}} is their WhatsApp name.
-  let context = { name: conversation.contactName ?? '', total_donated: '', last_donation_date: '', organization: '' };
+  let context = contactContext(conversation.contactName ?? '');
   if (conversation.donor) {
     const donor = await prisma.donor.findUniqueOrThrow({ where: { id: conversation.donor.id } });
     context = (await contextsFor(auth.organizationId, [donor])).get(donor.id)!;
@@ -273,7 +274,7 @@ export async function sendInConversation(
     await auditSend(auth, conversation, provider, content.templateName ?? null, req);
     return publicMessage(sent);
   } catch (error) {
-    await prisma.whatsAppMessage.update({ where: { id: message.id }, data: { status: 'FAILED', error: sanitizeError(error) } });
+    await prisma.whatsAppMessage.update({ where: { id: message.id }, data: { status: 'FAILED', ...failureOf(error) } });
     throw error;
   }
 }
@@ -333,7 +334,7 @@ export async function sendMediaInConversation(
     await auditSend(auth, conversation, 'CLOUD_API', null, req);
     return publicMessage(sent);
   } catch (error) {
-    await prisma.whatsAppMessage.update({ where: { id: message.id }, data: { status: 'FAILED', error: sanitizeError(error) } });
+    await prisma.whatsAppMessage.update({ where: { id: message.id }, data: { status: 'FAILED', ...failureOf(error) } });
     throw error;
   }
 }

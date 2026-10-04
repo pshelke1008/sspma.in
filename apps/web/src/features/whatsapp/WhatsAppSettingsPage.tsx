@@ -54,6 +54,7 @@ import {
   type WhatsAppStatus,
 } from './api';
 import { QualityBadge, WabaPickerDialog } from './WabaPickerDialog';
+import { TemplatesCard } from './TemplatesCard';
 
 /** WhatsApp brand green — only for the brand tile and the Connect button. */
 const WHATSAPP_GREEN = '#075e4d';
@@ -66,6 +67,8 @@ function applyStatus(status: WhatsAppStatus) {
 export default function WhatsAppSettingsPage() {
   const { t } = useTranslation();
   const { data: status, isLoading, error, refetch } = useWhatsAppStatus();
+  const { can } = useAuth();
+  const canManage = can('whatsapp.manage');
   const [searchParams, setSearchParams] = useSearchParams();
   const [pendingId, setPendingId] = useState<string | null>(null);
 
@@ -164,6 +167,8 @@ export default function WhatsAppSettingsPage() {
             <WhatsAppBusinessCard status={status} />
             <LinkedDeviceCard status={status} />
           </div>
+
+          {canManage && status.cloud.status === 'CONNECTED' && (status.cloud.numbers ?? []).length > 0 && <TemplatesCard status={status} />}
 
           <InboxAccessCard />
         </div>

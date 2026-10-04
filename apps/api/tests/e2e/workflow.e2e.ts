@@ -11,6 +11,8 @@ import http from 'node:http';
 import path from 'node:path';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import dotenv from 'dotenv';
+import ExcelJS from 'exceljs';
+import { PrismaClient } from '@prisma/client';
 
 dotenv.config({ path: path.resolve(__dirname, '../../../../.env') });
 
@@ -51,7 +53,7 @@ function testDatabaseUrl(): string {
  */
 const GRAPH_PORT = Number(process.env.E2E_GRAPH_PORT ?? 4398);
 const META_APP_ID = 'e2e-meta-app';
-const graphCalls: { method: string; path: string; auth: string | null }[] = [];
+const graphCalls: { method: string; path: string; auth: string | null; query: string; body: any }[] = [];
 let graphServer: http.Server | null = null;
 /** A tiny JPEG (just the magic bytes plus padding) standing in for a photo a donor sends. */
 const E2E_JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(60, 1)]);
@@ -89,8 +91,12 @@ function inboundPayload(phoneNumberId: string, from: string, name: string, messa
   };
 }
 
+function fakeTemplate(name: string, language: string, status: string, id: string, components: unknown[]) {
+  return { id, name, language, status, category: 'UTILITY', components };
+}
+
 function startFakeGraph(): Promise<void> {
-  const routes: Record<string, (url: URL) => unknown> = {
+  const routes: Record<string, (url: URL, body: any) => unknown> = {
     'GET /v21.0/oauth/access_token': (url) =>
       url.searchParams.get('grant_type') === 'fb_exchange_token'
         ? { access_token: 'e2e-long-lived-token', expires_in: 60 * 86_400 }
@@ -121,22 +127,58 @@ function startFakeGraph(): Promise<void> {
     'GET /v21.0/900000001': () => ({ display_phone_number: '+91 98200 00001', verified_name: 'E2E Ashram', quality_rating: 'GREEN' }),
     'POST /v21.0/900000001/messages': () => ({ messages: [{ id: `wamid.out.${graphCalls.length}` }] }),
     'POST /v21.0/900000002/messages': () => ({ messages: [{ id: `wamid.out.${graphCalls.length}` }] }),
+    // Two pages, so listing has to follow the cursor to see everything.
+    'GET /v21.0/111111111/message_templates': (url) =>
+      url.searchParams.get('after') === 'page-2'
+        ? { data: [fakeTemplate('shanti_appeal', 'mr', 'APPROVED', '2', [{ type: 'BODY', text: 'Namaskar {{1}}, Gurupurnima is near.' }])] }
+        : {
+            data: [
+              fakeTemplate('donation_thanks', 'en', 'APPROVED', '1', [{ type: 'BODY', text: 'Namaskar {{1}}, thank you for {{2}}.' }]),
+              fakeTemplate('event_banner', 'en', 'APPROVED', '3', [{ type: 'HEADER', format: 'IMAGE' }, { type: 'BODY', text: 'Join us' }]),
+              fakeTemplate('still_pending', 'en', 'PENDING', '4', [{ type: 'BODY', text: 'Hello' }]),
+            ],
+            paging: { cursors: { after: 'page-2' }, next: 'https://graph.example/next' },
+          },
+    'POST /v21.0/111111111/message_templates': (_url, body) =>
+      body?.name === 'dup_name'
+        ? { error: { code: 100, message: 'Invalid parameter', error_user_msg: 'Content in this language already exists.' } }
+        : { id: '777', status: 'PENDING', category: body?.category },
+    'DELETE /v21.0/111111111/message_templates': () => ({ success: true }),
+    // Meta's resumable upload: open a session, then send the bytes.
+    [`POST /v21.0/${META_APP_ID}/uploads`]: () => ({ id: 'upload:e2e-session' }),
+    'POST /v21.0/upload:e2e-session': () => ({ h: '4::e2e-sample-handle' }),
     'POST /v21.0/900000001/media': () => ({ id: 'e2e-uploaded-media' }),
     'GET /v21.0/e2e-inbound-photo': () => ({ url: `http://localhost:${GRAPH_PORT}/files/e2e-inbound-photo`, mime_type: 'image/jpeg', file_size: E2E_JPEG.length }),
     'GET /files/e2e-inbound-photo': () => E2E_JPEG,
   };
   graphServer = http.createServer((req, res) => {
-    const url = new URL(req.url ?? '/', `http://localhost:${GRAPH_PORT}`);
-    graphCalls.push({ method: req.method ?? 'GET', path: url.pathname, auth: req.headers.authorization ?? null });
-    const handler = routes[`${req.method} ${url.pathname}`];
-    const body = handler ? handler(url) : { error: { code: 803, message: 'Unknown path' } };
-    if (Buffer.isBuffer(body)) {
-      res.writeHead(200, { 'Content-Type': 'image/jpeg' });
-      res.end(body);
-      return;
-    }
-    res.writeHead(body && typeof body === 'object' && 'error' in body ? 400 : 200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(body));
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const url = new URL(req.url ?? '/', `http://localhost:${GRAPH_PORT}`);
+      let requestBody: any = null;
+      try {
+        requestBody = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null;
+      } catch {
+        // Media uploads are multipart; only JSON bodies are inspected.
+      }
+      graphCalls.push({
+        method: req.method ?? 'GET',
+        path: url.pathname,
+        auth: req.headers.authorization ?? null,
+        query: url.search,
+        body: requestBody,
+      });
+      const handler = routes[`${req.method} ${url.pathname}`];
+      const body = handler ? handler(url, requestBody) : { error: { code: 803, message: 'Unknown path' } };
+      if (Buffer.isBuffer(body)) {
+        res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+        res.end(body);
+        return;
+      }
+      res.writeHead(body && typeof body === 'object' && 'error' in body ? 400 : 200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
+    });
   });
   return new Promise((resolve) => graphServer!.listen(GRAPH_PORT, resolve));
 }
@@ -253,7 +295,7 @@ async function startApi(): Promise<ChildProcess> {
   console.log('  Starting an API process for the run…');
   const child = spawn('npx', ['tsx', 'apps/api/src/index.ts'], {
     cwd: ROOT,
-    env: { ...process.env, API_PORT: String(TEST_PORT), NODE_ENV: 'test' },
+    env: { ...process.env, API_PORT: String(TEST_PORT), NODE_ENV: 'test', WHATSAPP_SCHEDULER_INTERVAL_MS: '1000' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -1191,6 +1233,453 @@ async function main() {
       disconnectOne.status === 200 && (disconnectOne.data as any).cloud.numbers.length === 1,
       disconnectOne.status,
     );
+
+    // ------------------------------------------------ Templates & broadcasts ---
+    section('13f. WhatsApp — message templates and template broadcasts');
+
+    const sendable = (await call(accountant, 'GET', '/whatsapp/cloud/templates')).data as any;
+    check(
+      'The send list holds approved, sendable templates from every page',
+      sendable.data?.map((item: any) => item.name).join() === 'donation_thanks,shanti_appeal' && sendable.hidden === 1,
+      sendable,
+    );
+    check(
+      'A template reports how many variables it needs',
+      sendable.data?.find((item: any) => item.name === 'donation_thanks')?.bodyParameterCount === 2,
+      sendable.data,
+    );
+
+    const allTemplates = (await call(admin, 'GET', '/whatsapp/templates')).data as any;
+    check(
+      'Managers see every template with its review status',
+      allTemplates.data?.length === 4 && allTemplates.data.some((item: any) => item.status === 'PENDING'),
+      allTemplates.data?.map((item: any) => `${item.name}:${item.status}`),
+    );
+    const accountantTemplates = await call(accountant, 'GET', '/whatsapp/templates');
+    check('Only WhatsApp managers can manage templates (403)', accountantTemplates.status === 403, accountantTemplates.status);
+
+    const newTemplate = {
+      name: 'event_invite',
+      language: 'mr',
+      category: 'MARKETING',
+      headerText: 'Invitation',
+      bodyText: 'Dear {{1}}, join us on {{2}} at the ashram.',
+      bodyExamples: ['Asha', '12 Oct'],
+      footerText: 'Ashram',
+      buttons: [{ type: 'URL', text: 'Details', url: 'https://example.org' }],
+    };
+    const created = await call(admin, 'POST', '/whatsapp/templates', newTemplate);
+    const createCall = graphCalls.filter((item) => item.method === 'POST' && item.path === '/v21.0/111111111/message_templates').at(-1);
+    check(
+      'A template is submitted to Meta for review',
+      created.status === 201 && (created.data as any).data?.status === 'PENDING' && createCall?.auth === 'Bearer e2e-long-lived-token',
+      created.data,
+    );
+    check(
+      'The submission carries header, body examples, footer and buttons in Meta’s shape',
+      createCall?.body?.components?.[1]?.example?.body_text?.[0]?.join() === 'Asha,12 Oct' &&
+        createCall?.body?.components?.map((item: any) => item.type).join() === 'HEADER,BODY,FOOTER,BUTTONS',
+      createCall?.body,
+    );
+    const accountantCreate = await call(accountant, 'POST', '/whatsapp/templates', newTemplate);
+    check('Only WhatsApp managers can submit templates (403)', accountantCreate.status === 403, accountantCreate.status);
+    const gappy = await call(admin, 'POST', '/whatsapp/templates', { ...newTemplate, bodyText: 'Hi {{1}} and {{3}} today', bodyExamples: ['a', 'b'] });
+    check('Variables must be numbered without gaps (422)', gappy.status === 422, gappy.data);
+    const noExamples = await call(admin, 'POST', '/whatsapp/templates', { ...newTemplate, bodyExamples: ['Asha'] });
+    check('Every variable needs an example (422)', noExamples.status === 422, noExamples.data);
+    const duplicate = await call(admin, 'POST', '/whatsapp/templates', { ...newTemplate, name: 'dup_name' });
+    check(
+      'Meta’s own explanation reaches the user when it refuses a template',
+      duplicate.status === 400 &&
+        (duplicate.data as any).error?.code === 'WHATSAPP_TEMPLATE_INVALID' &&
+        String((duplicate.data as any).error?.message).includes('already exists'),
+      duplicate.data,
+    );
+
+    const content = { templateName: 'donation_thanks', templateLanguage: 'en' };
+    const templatePreview = await call(admin, 'POST', '/whatsapp/broadcasts/preview', {
+      donorIds: [savedDonor.id],
+      ...content,
+      templateParams: ['{{name}}', 'your gift'],
+    });
+    check(
+      'Broadcast preview shows the approved text with the donor’s values filled in',
+      templatePreview.status === 200 && (templatePreview.data as any).sample?.body === 'Namaskar Ramesh Kale, thank you for your gift.',
+      templatePreview.data,
+    );
+    const tooFew = await call(admin, 'POST', '/whatsapp/broadcasts/preview', { donorIds: [savedDonor.id], ...content, templateParams: ['{{name}}'] });
+    check(
+      'A template with a missing variable is refused before anything is queued',
+      tooFew.status === 400 && (tooFew.data as any).error?.code === 'WHATSAPP_TEMPLATE_PARAMS_MISMATCH',
+      tooFew.data,
+    );
+    const unsupported = await call(admin, 'POST', '/whatsapp/broadcasts/preview', {
+      donorIds: [savedDonor.id],
+      templateName: 'event_banner',
+      templateLanguage: 'en',
+      templateParams: [],
+    });
+    check(
+      'A template with an image header cannot be sent without a file',
+      unsupported.status === 400 && (unsupported.data as any).error?.code === 'WHATSAPP_TEMPLATE_HEADER_MEDIA_REQUIRED',
+      unsupported.data,
+    );
+    const notApproved = await call(admin, 'POST', '/whatsapp/broadcasts', {
+      name: 'E2E pending template',
+      donorIds: [savedDonor.id],
+      templateName: 'still_pending',
+      templateLanguage: 'en',
+      templateParams: [],
+    });
+    check(
+      'A template still in review cannot be broadcast',
+      notApproved.status === 409 && (notApproved.data as any).error?.code === 'WHATSAPP_TEMPLATE_NOT_FOUND',
+      notApproved.data,
+    );
+
+    const sentBefore = graphCalls.filter((item) => item.method === 'POST' && item.path === '/v21.0/900000001/messages').length;
+    const templateBroadcast = await call(admin, 'POST', '/whatsapp/broadcasts', {
+      name: 'E2E template broadcast',
+      donorIds: [savedDonor.id],
+      ...content,
+      templateParams: ['{{name}}', 'your gift'],
+    });
+    const broadcastId = (templateBroadcast.data as any).data?.id;
+    let finished: any = null;
+    for (let attempt = 0; attempt < 20 && finished?.status !== 'COMPLETED'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      finished = ((await call(admin, 'GET', `/whatsapp/broadcasts/${broadcastId}`)).data as any).data;
+    }
+    const templateSend = graphCalls.filter((item) => item.method === 'POST' && item.path === '/v21.0/900000001/messages').slice(sentBefore).at(-1);
+    check(
+      'A template broadcast is sent as a template with each donor’s own values',
+      templateBroadcast.status === 201 &&
+        finished?.sentCount === 1 &&
+        templateSend?.body?.type === 'template' &&
+        templateSend.body.template?.name === 'donation_thanks' &&
+        templateSend.body.template?.language?.code === 'en' &&
+        templateSend.body.template?.components?.[0]?.parameters?.map((item: any) => item.text).join('|') === 'Ramesh Kale|your gift',
+      { status: finished?.status, sent: finished?.sentCount, body: templateSend?.body },
+    );
+    check(
+      'The timeline records the text the donor actually received',
+      finished?.messages?.[0]?.body === 'Namaskar Ramesh Kale, thank you for your gift.',
+      finished?.messages?.[0]?.body,
+    );
+
+    const removed = await call(admin, 'DELETE', '/whatsapp/templates/shanti_appeal?id=2');
+    const deleteCall = graphCalls.filter((item) => item.method === 'DELETE').at(-1);
+    check(
+      'A single language of a template can be deleted',
+      removed.status === 204 && deleteCall?.query.includes('name=shanti_appeal') && deleteCall.query.includes('hsm_id=2'),
+      { status: removed.status, query: deleteCall?.query },
+    );
+    const accountantDelete = await call(accountant, 'DELETE', '/whatsapp/templates/shanti_appeal');
+    check('Only WhatsApp managers can delete templates (403)', accountantDelete.status === 403, accountantDelete.status);
+
+
+    // --------------------------------------------------- Broadcast wizard ---
+    section('13g. WhatsApp — broadcast wizard: audience, variables, media, schedule');
+
+    const mediaTemplates = (await call(admin, 'GET', '/whatsapp/cloud/templates?media=1')).data as any;
+    check(
+      'The wizard’s template list includes media-header templates; the normal one does not',
+      mediaTemplates.data?.some((item: any) => item.name === 'event_banner' && item.requiresHeaderMedia && item.headerFormat === 'IMAGE') &&
+        !sendable.data?.some((item: any) => item.name === 'event_banner'),
+      mediaTemplates.data?.map((item: any) => item.name),
+    );
+
+    const mkDonor = async (name: string, phone: string, extra: Record<string, unknown>) =>
+      ((await call(admin, 'POST', '/donors', { name, whatsappNumber: phone, ...extra })).data as any).data;
+    const asha = await mkDonor('Asha Patil', '+91 98201 00001', { whatsappOptIn: true, village: 'Shirdi' });
+    const notOptedIn = await mkDonor('Bhim Rao', '+91 98201 00002', { whatsappOptIn: false, village: 'Nashik' });
+    const noVillage = await mkDonor('Chhaya Joshi', '+91 98201 00003', { whatsappOptIn: true });
+    const ashaPhone = '919820100001';
+
+    const mapping = { '1': { source: 'donor', field: 'name' }, '2': { source: 'donor', field: 'village' } };
+    const audience = { audienceMode: 'SELECT', donorIds: [asha.id, notOptedIn.id, noVillage.id, savedDonor.id] };
+    const wizard = { templateName: 'donation_thanks', templateLanguage: 'en', variableMapping: mapping, ...audience };
+
+    const review = await call(admin, 'POST', '/whatsapp/campaigns/preview', wizard);
+    const reviewData = review.data as any;
+    check(
+      'The review counts who receives it and why others are left out',
+      review.status === 200 &&
+        reviewData.willReceive === 1 &&
+        reviewData.skipped?.NOT_OPTED_IN === 1 &&
+        reviewData.skipped?.MISSING_DATA === 2 &&
+        reviewData.found === 4,
+      reviewData,
+    );
+    check(
+      'Each sample shows that donor’s own message',
+      reviewData.samples?.[0]?.body === 'Namaskar Asha Patil, thank you for Shirdi.' && reviewData.samples?.[0]?.status === 'OK',
+      reviewData.samples,
+    );
+    check('The review gives a rough cost for the messages that will go out', reviewData.estimatedCost === 0.14, reviewData.estimatedCost);
+
+    const noMapping = await call(admin, 'POST', '/whatsapp/campaigns/preview', { ...wizard, variableMapping: { '1': mapping['1'] } });
+    check(
+      'A variable with no source is refused',
+      noMapping.status === 400 && (noMapping.data as any).error?.code === 'WHATSAPP_TEMPLATE_PARAMS_MISMATCH',
+      noMapping.data,
+    );
+    const columnWithoutSheet = await call(admin, 'POST', '/whatsapp/campaigns/preview', {
+      ...wizard,
+      variableMapping: { ...mapping, '2': { source: 'column', column: 'Amount' } },
+    });
+    check('A spreadsheet column cannot fill a variable when no sheet was uploaded', columnWithoutSheet.status === 400, columnWithoutSheet.data);
+    const noAudience = await call(admin, 'POST', '/whatsapp/campaigns/preview', { ...wizard, donorIds: [] });
+    check('An empty audience is refused (422)', noAudience.status === 422, noAudience.status);
+    const otherOrgDonors = ((await call(otherOrg, 'GET', '/donors/ids')).data as any).data.slice(0, 3);
+    const foreign = await call(admin, 'POST', '/whatsapp/campaigns', { name: 'Foreign', ...wizard, donorIds: otherOrgDonors });
+    check('Another organization’s donors cannot be broadcast to', foreign.status === 400 && (foreign.data as any).error?.code === 'WHATSAPP_NO_RECIPIENTS', foreign.data);
+    const approverPreview = await call(approver, 'POST', '/whatsapp/campaigns/preview', wizard);
+    check('Users without WhatsApp send permission are refused (403)', approverPreview.status === 403, approverPreview.status);
+
+    const sendsBefore = () => graphCalls.filter((item) => item.method === 'POST' && item.path === '/v21.0/900000001/messages');
+    const baseline = sendsBefore().length;
+    const createdWizard = await call(admin, 'POST', '/whatsapp/campaigns', { name: 'E2E wizard broadcast', ...wizard });
+    const wizardId = (createdWizard.data as any).data?.id;
+    let wizardDone: any = null;
+    for (let attempt = 0; attempt < 24 && wizardDone?.status !== 'COMPLETED'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      wizardDone = ((await call(admin, 'GET', `/whatsapp/broadcasts/${wizardId}`)).data as any).data;
+    }
+    const wizardSend = sendsBefore().slice(baseline);
+    check(
+      'The broadcast sends one template message with that donor’s own values, to that donor',
+      createdWizard.status === 201 &&
+        wizardSend.length === 1 &&
+        wizardSend[0].body?.to === ashaPhone &&
+        wizardSend[0].body?.template?.components?.[0]?.parameters?.map((item: any) => item.text).join('|') === 'Asha Patil|Shirdi',
+      { sends: wizardSend.map((item) => item.body) },
+    );
+    check(
+      'Donors without consent or data are recorded as skipped, with the reason',
+      wizardDone?.sentCount === 1 &&
+        wizardDone?.skippedCount === 3 &&
+        wizardDone?.audienceMode === 'SELECT' &&
+        wizardDone?.messages?.filter((item: any) => item.status === 'SKIPPED').map((item: any) => item.error).sort().join() ===
+          'WHATSAPP_MISSING_DATA,WHATSAPP_MISSING_DATA,WHATSAPP_NOT_OPTED_IN',
+      wizardDone?.messages?.map((item: any) => `${item.status}:${item.error}`),
+    );
+
+    const wamid = wizardDone?.messages?.find((item: any) => item.status === 'SENT')?.providerMessageId;
+    const receipt = (status: string) => ({
+      entry: [{ changes: [{ value: { metadata: { phone_number_id: '900000001' }, statuses: [{ id: wamid, status, timestamp: String(Math.floor(Date.now() / 1000)) }] } }] }],
+    });
+    await postWebhook(receipt('delivered'));
+    const afterDelivered = ((await call(admin, 'GET', `/whatsapp/broadcasts/${wizardId}?summary=1`)).data as any).data;
+    await postWebhook(receipt('read'));
+    const afterRead = ((await call(admin, 'GET', `/whatsapp/broadcasts/${wizardId}?summary=1`)).data as any).data;
+    check(
+      'Delivery and read receipts update the broadcast’s counts',
+      afterDelivered.deliveredCount === 1 && afterDelivered.readCount === 0 && afterRead.deliveredCount === 1 && afterRead.readCount === 1,
+      { delivered: afterDelivered.deliveredCount, read: afterRead.readCount },
+    );
+
+    // A later failure: Meta accepted the message, then reported it could not deliver (here, billing).
+    await postWebhook({
+      entry: [{ changes: [{ value: { metadata: { phone_number_id: '900000001' }, statuses: [{
+        id: wamid, status: 'failed', timestamp: String(Math.floor(Date.now() / 1000)),
+        errors: [{ code: 131042, title: 'Business eligibility payment issue', message: 'Business eligibility payment issue', error_data: { details: 'Your WhatsApp Business account currency is not configured.' } }],
+      }] } }] }],
+    });
+    const failedPage = (await call(admin, 'GET', `/whatsapp/broadcasts/${wizardId}/messages?status=FAILED`)).data as any;
+    check(
+      'A failed delivery keeps Meta’s reason: a clear code for billing, and Meta’s own words',
+      failedPage.data?.[0]?.error === 'WHATSAPP_PAYMENT_ISSUE' &&
+        String(failedPage.data?.[0]?.errorDetail).includes('131042') &&
+        String(failedPage.data?.[0]?.errorDetail).includes('currency is not configured'),
+      failedPage.data?.[0],
+    );
+
+    const noDonation = await call(admin, 'POST', '/whatsapp/campaigns/preview', {
+      ...wizard,
+      donorIds: [asha.id],
+      variableMapping: { '1': mapping['1'], '2': { source: 'donor', field: 'last_donation_date' } },
+    });
+    check(
+      'A donor who has never donated is not sent "—" as a last-donation date',
+      (noDonation.data as any).willReceive === 0 && (noDonation.data as any).skipped?.MISSING_DATA === 1,
+      noDonation.data,
+    );
+
+    const skippedPage = (await call(admin, 'GET', `/whatsapp/broadcasts/${wizardId}/messages?status=SKIPPED&pageSize=2`)).data as any;
+    check(
+      'A broadcast’s recipients can be listed a page at a time by status',
+      skippedPage.data?.length === 2 && skippedPage.meta?.total === 3 && skippedPage.meta?.totalPages === 2 && Boolean(skippedPage.data[0].donor?.name),
+      skippedPage.meta,
+    );
+
+    // ----------------------------------------------- Spreadsheet audience ---
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Recipients');
+    sheet.addRows([
+      ['Phone', 'Name', 'Amount'],
+      ['98201 00001', 'Asha', 5000],
+      ['9000000099', 'Stranger', 100],
+      ['not a number', 'Broken', 1],
+      ['+91 98201 00001', 'Asha again', 7],
+      ['9820100003', 'Chhaya', 250],
+    ]);
+    const sheetBuffer = Buffer.from(await workbook.xlsx.writeBuffer());
+    const uploadSheet = async (session: Session, bytes: Buffer, name = 'recipients.xlsx') => {
+      const form = new FormData();
+      form.append('file', new Blob([bytes]), name);
+      const response = await fetch(`${BASE}/whatsapp/campaigns/recipients`, { method: 'POST', headers: { Authorization: `Bearer ${session.token}` }, body: form });
+      return { status: response.status, data: (await response.json()) as any };
+    };
+    const uploaded = await uploadSheet(admin, sheetBuffer);
+    check(
+      'An uploaded spreadsheet is matched to donors; unknown, invalid and repeated numbers are counted',
+      uploaded.status === 200 &&
+        uploaded.data.stats?.rows === 5 &&
+        uploaded.data.stats?.matched === 2 &&
+        uploaded.data.stats?.unmatched === 1 &&
+        uploaded.data.stats?.invalid === 1 &&
+        uploaded.data.stats?.duplicates === 1 &&
+        uploaded.data.columns?.join() === 'Phone,Name,Amount',
+      uploaded.data.stats,
+    );
+    check(
+      'A number that belongs to no donor is never messaged, and is shown masked',
+      uploaded.data.unmatched?.[0]?.phone?.includes('••') === true && !JSON.stringify(uploaded.data).includes('9000000099'),
+      uploaded.data.unmatched,
+    );
+    const notASheet = await uploadSheet(admin, Buffer.from('a,b,c'), 'data.csv');
+    check('A file that is not a spreadsheet is refused with a clear code', notASheet.status === 409 || notASheet.status === 400, notASheet);
+    const sheetRefused = await uploadSheet(approver, sheetBuffer);
+    check('Uploading recipients needs WhatsApp send permission (403)', sheetRefused.status === 403, sheetRefused.status);
+
+    const example = await fetch(`${BASE}/whatsapp/campaigns/recipients/template?variables=2`, { headers: { Authorization: `Bearer ${admin.token}` } });
+    check(
+      'An example spreadsheet can be downloaded',
+      example.status === 200 && (example.headers.get('content-type') ?? '').includes('spreadsheetml') && (await example.arrayBuffer()).byteLength > 1000,
+      example.status,
+    );
+
+    const uploadWizard = {
+      templateName: 'donation_thanks',
+      templateLanguage: 'en',
+      audienceMode: 'UPLOAD',
+      recipients: uploaded.data.recipients.map((item: any) => ({ donorId: item.donorId, row: { Amount: item.row.Amount } })),
+      variableMapping: { '1': { source: 'static', value: 'Friend of {{organization}}' }, '2': { source: 'column', column: 'Amount' } },
+    };
+    const uploadReview = (await call(admin, 'POST', '/whatsapp/campaigns/preview', uploadWizard)).data as any;
+    check(
+      'Static text can use donor placeholders, and a column fills a variable from the sheet',
+      uploadReview.samples?.[0]?.body === 'Namaskar Friend of Ashram Management, thank you for 5000.' && uploadReview.willReceive === 2,
+      uploadReview.samples,
+    );
+
+    // -------------------------------------------------------- Media header ---
+    const bannerMapping = { templateName: 'event_banner', templateLanguage: 'en', variableMapping: {}, audienceMode: 'SELECT', donorIds: [asha.id] };
+    const noFile = await call(admin, 'POST', '/whatsapp/campaigns', { name: 'Banner', ...bannerMapping });
+    check(
+      'A media-header template needs its file',
+      noFile.status === 400 && (noFile.data as any).error?.code === 'WHATSAPP_TEMPLATE_HEADER_MEDIA_REQUIRED',
+      noFile.data,
+    );
+    const postFile = async (route: string, session: Session, bytes: Buffer, type: string, name: string) => {
+      const form = new FormData();
+      form.append('file', new Blob([bytes], { type }), name);
+      const response = await fetch(`${BASE}${route}`, { method: 'POST', headers: { Authorization: `Bearer ${session.token}` }, body: form });
+      return { status: response.status, data: (await response.json()) as any };
+    };
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(80, 2)]);
+    const badMedia = await postFile('/whatsapp/campaigns/header-media', admin, Buffer.from('plain text'), 'text/plain', 'notes.txt');
+    check('Only images, videos and PDFs can be a header', badMedia.status === 400 && badMedia.data.error?.code === 'WHATSAPP_MEDIA_INVALID', badMedia.data);
+    const headerUpload = await postFile('/whatsapp/campaigns/header-media', admin, png, 'image/png', 'banner.png');
+    check(
+      'A header image is uploaded to Meta and returns its media id',
+      headerUpload.status === 201 && headerUpload.data.data?.mediaId === 'e2e-uploaded-media' && headerUpload.data.data?.kind === 'image',
+      headerUpload.data,
+    );
+    const wrongKind = await call(admin, 'POST', '/whatsapp/campaigns', {
+      name: 'Banner',
+      ...bannerMapping,
+      headerMedia: { mediaId: 'e2e-uploaded-media', fileName: 'clip.mp4', kind: 'video' },
+    });
+    check('A video cannot stand in for an image header', wrongKind.status === 400 && (wrongKind.data as any).error?.code === 'WHATSAPP_MEDIA_INVALID', wrongKind.data);
+
+    const beforeBanner = sendsBefore().length;
+    const banner = await call(admin, 'POST', '/whatsapp/campaigns', { name: 'E2E banner', ...bannerMapping, headerMedia: headerUpload.data.data });
+    for (let attempt = 0; attempt < 24 && sendsBefore().length === beforeBanner; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 250));
+    const bannerSend = sendsBefore().slice(beforeBanner).at(-1);
+    check(
+      'The header image is sent as the template’s header',
+      banner.status === 201 &&
+        bannerSend?.body?.template?.name === 'event_banner' &&
+        bannerSend.body.template.components?.[0]?.type === 'header' &&
+        bannerSend.body.template.components[0].parameters?.[0]?.image?.id === 'e2e-uploaded-media',
+      bannerSend?.body,
+    );
+
+    // ----------------------------------------------------------- Schedule ---
+    const inMinutes = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
+    const past = await call(admin, 'POST', '/whatsapp/campaigns', { name: 'Late', ...wizard, scheduledAt: inMinutes(-5) });
+    const tooFar = await call(admin, 'POST', '/whatsapp/campaigns', { name: 'Far', ...wizard, scheduledAt: inMinutes(60 * 24 * 40) });
+    check(
+      'A schedule in the past, or beyond 30 days, is refused',
+      past.status === 400 && tooFar.status === 400 && (past.data as any).error?.code === 'WHATSAPP_SCHEDULE_INVALID',
+      [past.data, tooFar.data],
+    );
+
+    const beforeSchedule = sendsBefore().length;
+    const scheduled = await call(admin, 'POST', '/whatsapp/campaigns', { name: 'E2E scheduled', ...wizard, donorIds: [asha.id], scheduledAt: inMinutes(10) });
+    const scheduledId = (scheduled.data as any).data?.id;
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    const waiting = ((await call(admin, 'GET', `/whatsapp/broadcasts/${scheduledId}?summary=1`)).data as any).data;
+    check(
+      'A scheduled broadcast waits for its time and sends nothing early',
+      scheduled.status === 201 && waiting.status === 'SCHEDULED' && sendsBefore().length === beforeSchedule,
+      waiting.status,
+    );
+    const cancelled = (await call(admin, 'POST', `/whatsapp/broadcasts/${scheduledId}/cancel`)).data as any;
+    check('A scheduled broadcast can be cancelled before it starts', cancelled.data?.status === 'CANCELLED' && cancelled.data?.skippedCount === 1, cancelled.data);
+
+    const dueSoon = await call(admin, 'POST', '/whatsapp/campaigns', { name: 'E2E due', ...wizard, donorIds: [asha.id], scheduledAt: inMinutes(10) });
+    const dueId = (dueSoon.data as any).data?.id;
+    const database = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL });
+    await database.whatsAppBroadcast.update({ where: { id: dueId }, data: { scheduledAt: new Date(Date.now() - 1000) } });
+    await database.$disconnect();
+    let ran: any = null;
+    for (let attempt = 0; attempt < 30 && ran?.status !== 'COMPLETED'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      ran = ((await call(admin, 'GET', `/whatsapp/broadcasts/${dueId}?summary=1`)).data as any).data;
+    }
+    check('A scheduled broadcast starts by itself when its time comes, once', ran?.status === 'COMPLETED' && ran?.sentCount === 1, ran);
+
+    // ------------------------------------- Template with a media header ---
+    const sampleUpload = await postFile('/whatsapp/templates/header-sample', admin, png, 'image/png', 'sample.png');
+    const sampleCalls = graphCalls.filter((item) => item.path === '/v21.0/upload:e2e-session');
+    check(
+      'A header sample is sent to Meta’s resumable upload and returns the handle',
+      sampleUpload.status === 201 && sampleUpload.data.data?.handle === '4::e2e-sample-handle' && sampleCalls.at(-1)?.auth === 'OAuth e2e-long-lived-token',
+      { status: sampleUpload.status, auth: sampleCalls.at(-1)?.auth },
+    );
+    const sampleDenied = await postFile('/whatsapp/templates/header-sample', accountant, png, 'image/png', 'sample.png');
+    check('Only WhatsApp managers can upload a template sample (403)', sampleDenied.status === 403, sampleDenied.status);
+    const withHeader = await call(admin, 'POST', '/whatsapp/templates', {
+      name: 'banner_invite',
+      language: 'en',
+      category: 'MARKETING',
+      headerFormat: 'IMAGE',
+      headerHandle: sampleUpload.data.data.handle,
+      bodyText: 'Join us at the ashram.',
+      bodyExamples: [],
+      buttons: [],
+    });
+    const headerCreate = graphCalls.filter((item) => item.method === 'POST' && item.path === '/v21.0/111111111/message_templates').at(-1);
+    check(
+      'A template with an image header is submitted with the sample handle',
+      withHeader.status === 201 && headerCreate?.body?.components?.[0]?.format === 'IMAGE' && headerCreate.body.components[0].example?.header_handle?.[0] === '4::e2e-sample-handle',
+      headerCreate?.body,
+    );
+    const headerNoSample = await call(admin, 'POST', '/whatsapp/templates', { name: 'banner_two', language: 'en', category: 'MARKETING', headerFormat: 'IMAGE', bodyText: 'Hi', bodyExamples: [], buttons: [] });
+    check('An image header without a sample file is refused (422)', headerNoSample.status === 422, headerNoSample.status);
 
     const disconnectAfter = await call(admin, 'DELETE', '/whatsapp/cloud');
     check('The Facebook connection can be disconnected', disconnectAfter.status === 200 && (disconnectAfter.data as any).cloud.status === 'DISCONNECTED', disconnectAfter.status);

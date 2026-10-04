@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { sendingProvider, useWhatsAppStatus } from './api';
-import { EMPTY_COMPOSER, MessageComposer, hasContent, toContent, type ComposerState } from './MessageComposer';
+import { EMPTY_COMPOSER, MessageComposer, contentError, toContent, type ComposerState } from './MessageComposer';
 
 /** One message to one donor, from their profile. */
 export function SendMessageDialog({
@@ -51,8 +51,9 @@ export function SendMessageDialog({
   });
 
   function submit() {
-    if (!hasContent(composer, provider)) {
-      setError(composer.mode === 'template' && provider === 'CLOUD_API' ? 'whatsapp.chooseTemplate' : 'whatsapp.messageRequired');
+    const problem = contentError(composer, provider);
+    if (problem) {
+      setError(problem);
       return;
     }
     setError(undefined);

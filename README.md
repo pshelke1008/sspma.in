@@ -160,6 +160,47 @@ CAThrives integration:
 | Limits | Free text only within 24h of the donor's last message; otherwise approved templates | Paced a few seconds apart and capped at `WHATSAPP_MONTHLY_LIMIT` per month |
 | Receipts & replies | Webhook at `/api/webhooks/whatsapp` (signed with `WHATSAPP_APP_SECRET`) | Arrive over the linked session |
 
+- **Templates** (Cloud API). Settings → WhatsApp → *Message templates* lists every
+  template of the business account with Meta's review status, submits new ones
+  for approval (text header, body with `{{1}}…` variables and examples, footer,
+  up to three buttons) and deletes them. Approved templates appear in the
+  template picker of the send and broadcast dialogs, with a live preview and one
+  box per variable (`{{name}}`-style donor placeholders work there too). A
+  template is checked against Meta's list before a broadcast is queued — it must
+  be approved and every variable filled. Templates with a media header, dynamic
+  buttons or named variables are listed but not offered for sending yet.
+  Managing templates needs the `whatsapp.manage` permission.
+- **Broadcasts** (sidebar → *Broadcasts*, `whatsapp.send`). A five-minute wizard for
+  template broadcasts on the Cloud API:
+  1. **Template** — name it, pick an approved template (live preview). A template with an
+     image, video or PDF header takes the file here; it is uploaded to Meta and sent as the header.
+  2. **Audience** — nobody is selected until you choose how: *everyone who agreed*,
+     *filter donors* (category, tag, state, district, village; at least one filter),
+     *pick donors* (searchable, tick one by one or all matches) or *upload Excel*. In every case only
+     active donors who opted in are messaged. A spreadsheet only chooses *who*: each phone
+     number is matched to a donor (any of their numbers), and numbers that belong to no
+     donor are listed and never messaged, because consent is recorded on the donor. Download
+     the example sheet from the same step. Up to 5,000 donors per broadcast.
+  3. **Variables** — for each `{{n}}`, choose a donor detail (name, code, phone, village,
+     district, state, total given, last donation date, ashram name), fixed text (donor
+     placeholders work inside it) or a column of the uploaded sheet. A donor missing a value
+     (say no village) is left out and recorded as *Missing data*, never sent a blank.
+  4. **Review & send** — who receives it, who is left out and why, one sample message per
+     recipient, a rough cost (₹, with GST; Meta's invoice is what counts), and *send now* or
+     *schedule* (1 minute to 30 days ahead; a scheduled broadcast can be cancelled until it starts).
+
+  **Templates** (sidebar, `whatsapp.manage`) is the template library: your templates with
+  Meta's review status, seven ready-made starters in मराठी and English (donation thanks,
+  receipt ready, event invitation and reminder, festival greeting, donation appeal, volunteer
+  thanks), *Add template* pop-ups (also on the Broadcasts page and inside the wizard), and
+  *use as a starting point* on any existing template — approved text cannot be edited in
+  place at Meta, so a change goes in as a revised copy under a new name.
+
+  *Broadcasts* lists every broadcast; opening one shows sent / delivered / read / failed /
+  skipped counts (delivery and read receipts arrive through the webhook), the template, and the
+  recipients page by page with their status. `WHATSAPP_SCHEDULER_INTERVAL_MS` (default 30000)
+  sets how often scheduled broadcasts are checked. The quick *Send WhatsApp* dialog on the
+  Donors page still works for text, or a template without a media header.
 - **Consent is enforced on the server.** Only active donors with a valid number
   who have opted in are messaged; a broadcast shows who will be skipped before
   it is sent, and records the skipped ones with the reason.
@@ -224,8 +265,8 @@ word; screen text lives in `apps/web/src/i18n/locales`.
 
 | Suite | Coverage |
 | --- | --- |
-| `npm test` | 73 unit tests: donor CSV import parsing and duplicate detection, state machine, transition permissions, separation of duties, edit/delete guards, line arithmetic, financial-year maths, phone normalisation, secret encryption, WhatsApp error codes |
-| `npm run test:e2e` | 201 checks: auth, RBAC, tenant isolation, the whole expense lifecycle, admin on-behalf entry and self-approval, revisions, all 14 reports, PDF/Excel/CSV exports in English and Marathi, audit log, notifications, banking, donors, WhatsApp consent and permission guards, settings |
+| `npm test` | 110 unit tests: donor CSV import parsing and duplicate detection, state machine, transition permissions, separation of duties, edit/delete guards, line arithmetic, financial-year maths, phone normalisation, secret encryption, WhatsApp error codes, template parsing and validation, spreadsheet audience, scheduling |
+| `npm run test:e2e` | 251 checks: auth, RBAC, tenant isolation, the whole expense lifecycle, admin on-behalf entry and self-approval, revisions, all 14 reports, PDF/Excel/CSV exports in English and Marathi, audit log, notifications, banking, donors, WhatsApp consent and permission guards, settings |
 | `npm run qa` | Every route at 1440/1280/1024/768/430/390/375, and again in Marathi at desktop and phone width — console errors, 5xx responses, horizontal overflow, forbidden wording, WCAG 2.1 AA (axe) |
 | `npm run qa:workflow` | 55 checks driving the real interface: the four-step wizard, approval, payment, all detail tabs, real file downloads, filter persistence, empty states, permission gating, admin Submit & Approve on behalf of a user, donors, broadcasts, WhatsApp settings, language switching |
 

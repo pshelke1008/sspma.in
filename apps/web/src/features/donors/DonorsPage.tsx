@@ -570,6 +570,12 @@ export default function DonorsPage() {
 
         {canMessage && (
           <TabsContent value="broadcasts">
+            <p className="mb-3 text-[12.5px] text-ink-muted">
+              {t('whatsapp.campaign.donorsTabHint')}{' '}
+              <Link to="/whatsapp/broadcasts" className="font-medium text-brand underline-offset-2 hover:underline">
+                {t('whatsapp.campaign.openBroadcasts')}
+              </Link>
+            </p>
             <BroadcastHistory />
           </TabsContent>
         )}
