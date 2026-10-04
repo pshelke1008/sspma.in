@@ -1,0 +1,1058 @@
+// ---------------------------------------------------------------------------
+// Ashram Management — Prisma schema
+// Every organization-owned record carries organizationId for tenant isolation.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------- Enums ---------------------------------------
+
+enum ExpenseStatus {
+  DRAFT
+  SUBMITTED
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  PAYMENT_PENDING
+  PAID
+  ACCOUNTING_POSTED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PARTIAL
+  PAID
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  UPI
+  CHEQUE
+  OTHER
+}
+
+enum ApprovalDecision {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  INCOME
+  EXPENSE
+}
+
+enum TransactionType {
+  EXPENSE
+  DONATION
+  INCOME
+  PAYMENT
+  TRANSFER
+  JOURNAL
+  OPENING_BALANCE
+}
+
+enum DonationMode {
+  CASH
+  BANK_TRANSFER
+  UPI
+  CHEQUE
+  ONLINE
+  KIND
+}
+
+enum PurchaseStatus {
+  DRAFT
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum BankAccountType {
+  BANK
+  CASH
+  UPI_WALLET
+}
+
+enum NotificationType {
+  EXPENSE_SUBMITTED
+  EXPENSE_APPROVED
+  EXPENSE_REJECTED
+  PAYMENT_RECORDED
+  REPORT_GENERATED
+  DONATION_RECEIVED
+  SYSTEM
+}
+
+enum ReportStatus {
+  QUEUED
+  READY
+  FAILED
+}
+
+enum DonorCategory {
+  INDIVIDUAL
+  FAMILY
+  TRUST
+  CORPORATE
+  ORGANIZATION
+}
+
+enum WhatsAppProvider {
+  CLOUD_API
+  WEB_QR
+}
+
+enum WhatsAppConnectionStatus {
+  DISCONNECTED
+  CONNECTING
+  QR_REQUIRED
+  CONNECTED
+  FAILED
+}
+
+enum WhatsAppMessageStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  SKIPPED
+  RECEIVED
+}
+
+enum WhatsAppDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum WhatsAppBroadcastStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+enum AttachmentKind {
+  INVOICE
+  BILL
+  RECEIPT
+  SUPPORTING
+}
+
+// ----------------------------- Tenancy & identity --------------------------
+
+model Organization {
+  id             String   @id @default(cuid())
+  name           String
+  legalName      String?
+  slug           String   @unique
+  registrationNo String?
+  panNumber      String?
+  email          String?
+  phone          String?
+  website        String?
+  addressLine1   String?
+  addressLine2   String?
+  city           String?
+  state          String?
+  postalCode     String?
+  country        String   @default("India")
+  currency       String   @default("INR")
+  logoUrl        String?
+  tagline        String?  @default("Service • Education • Compassion")
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  users           User[]
+  roles           Role[]
+  departments     Department[]
+  funds           Fund[]
+  costCenters     CostCenter[]
+  categories      ExpenseCategory[]
+  suppliers       Supplier[]
+  expenses        Expense[]
+  payments        Payment[]
+  attachments     Attachment[]
+  approvals       Approval[]
+  auditLogs       AuditLog[]
+  accounts        Account[]
+  transactions    Transaction[]
+  notifications   Notification[]
+  reports         Report[]
+  financialYears  FinancialYear[]
+  donors          Donor[]
+  donations       Donation[]
+  purchaseOrders  PurchaseOrder[]
+  bankAccounts    BankAccount[]
+  bankTransfers   BankTransfer[]
+  settings        OrgSetting[]
+  incomeEntries   IncomeEntry[]
+  sessions        Session[]
+  numberSequences NumberSequence[]
+  whatsAppChannel    WhatsAppChannel?
+  whatsAppMessages   WhatsAppMessage[]
+  whatsAppBroadcasts WhatsAppBroadcast[]
+
+  @@index([slug])
+}
+
+model User {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  email          String
+  mobile         String?
+  passwordHash   String
+  avatarUrl      String?
+  designation    String?
+  roleId         String
+  locale         String    @default("en")
+  isActive       Boolean   @default(true)
+  lastLoginAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  role         Role         @relation(fields: [roleId], references: [id])
+  sessions     Session[]
+
+  createdExpenses  Expense[]      @relation("ExpenseCreatedBy")
+  approvedExpenses Expense[]      @relation("ExpenseApprovedBy")
+  behalfExpenses   Expense[]      @relation("ExpenseOnBehalfOf")
+  donorsCreated    Donor[]        @relation("DonorCreatedBy")
+  whatsAppMessages   WhatsAppMessage[]
+  whatsAppBroadcasts WhatsAppBroadcast[]
+  approvals        Approval[]     @relation("ApprovalActor")
+  requestedApprovals Approval[]   @relation("ApprovalRequester")
+  auditLogs        AuditLog[]
+  notifications    Notification[]
+  payments         Payment[]
+  attachments      Attachment[]
+  reports          Report[]
+  donations        Donation[]
+  incomeEntries    IncomeEntry[]
+  purchaseOrders   PurchaseOrder[]
+  bankTransfers    BankTransfer[]
+  transactions     Transaction[]
+
+  @@unique([organizationId, email])
+  @@index([organizationId])
+  @@index([email])
+  @@index([organizationId, roleId])
+}
+
+model Role {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  key            String
+  description    String?
+  isSystem       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  users        User[]
+  permissions  RolePermission[]
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+}
+
+model Permission {
+  id          String  @id @default(cuid())
+  key         String  @unique
+  label       String
+  group       String
+  description String?
+
+  roles RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+}
+
+model Session {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  tokenHash      String   @unique
+  userAgent      String?
+  ipAddress      String?
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  createdAt      DateTime @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ----------------------------- Masters -------------------------------------
+
+model FinancialYear {
+  id             String   @id @default(cuid())
+  organizationId String
+  label          String
+  startDate      DateTime
+  endDate        DateTime
+  isActive       Boolean  @default(false)
+  isClosed       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, label])
+  @@index([organizationId])
+}
+
+model Department {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  code           String
+  description    String?
+  colorToken     String?
+  budgetAmount   Decimal  @default(0) @db.Decimal(14, 2)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  expenses       Expense[]
+  costCenters    CostCenter[]
+  donations      Donation[]
+  incomeEntries  IncomeEntry[]
+  purchaseOrders PurchaseOrder[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+}
+
+model Fund {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  code           String
+  description    String?
+  openingBalance Decimal  @default(0) @db.Decimal(14, 2)
+  isRestricted   Boolean  @default(false)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  expenses       Expense[]
+  donations      Donation[]
+  incomeEntries  IncomeEntry[]
+  purchaseOrders PurchaseOrder[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+}
+
+model CostCenter {
+  id             String   @id @default(cuid())
+  organizationId String
+  departmentId   String?
+  name           String
+  code           String
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  department   Department?  @relation(fields: [departmentId], references: [id])
+  expenses     Expense[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+  @@index([departmentId])
+}
+
+model ExpenseCategory {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  code           String
+  accountId      String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  account        Account?        @relation(fields: [accountId], references: [id])
+  expenses       Expense[]
+  purchaseOrders PurchaseOrder[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+}
+
+model Supplier {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  code           String
+  contactPerson  String?
+  email          String?
+  phone          String?
+  gstin          String?
+  panNumber      String?
+  addressLine1   String?
+  city           String?
+  state          String?
+  postalCode     String?
+  openingBalance Decimal  @default(0) @db.Decimal(14, 2)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  expenses       Expense[]
+  purchaseOrders PurchaseOrder[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+  @@index([organizationId, name])
+}
+
+model Donor {
+  id                String        @id @default(cuid())
+  organizationId    String
+  name              String
+  code              String
+  category          DonorCategory @default(INDIVIDUAL)
+  email             String?
+  phone             String?
+  whatsappNumber    String?
+  alternatePhone    String?
+  panNumber         String?
+  addressLine1      String?
+  addressLine2      String?
+  city              String?
+  state             String?
+  postalCode        String?
+  country           String        @default("India")
+  dateOfBirth       DateTime?
+  anniversaryDate   DateTime?
+  preferredLanguage String        @default("mr")
+  tags              String[]      @default([])
+  notes             String?
+  whatsappOptIn     Boolean       @default(false)
+  whatsappOptInAt   DateTime?
+  isActive          Boolean       @default(true)
+  createdById       String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?             @relation("DonorCreatedBy", fields: [createdById], references: [id])
+  donations    Donation[]
+  messages     WhatsAppMessage[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+  @@index([organizationId, name])
+  @@index([organizationId, whatsappOptIn])
+}
+
+model NumberSequence {
+  id             String   @id @default(cuid())
+  organizationId String
+  key            String
+  prefix         String
+  year           Int
+  nextValue      Int      @default(1)
+  padding        Int      @default(5)
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key, year])
+  @@index([organizationId])
+}
+
+// ----------------------------- Accounting ----------------------------------
+
+model Account {
+  id             String      @id @default(cuid())
+  organizationId String
+  code           String
+  name           String
+  type           AccountType
+  parentId       String?
+  isBankAccount  Boolean     @default(false)
+  openingBalance Decimal     @default(0) @db.Decimal(14, 2)
+  isActive       Boolean     @default(true)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  parent       Account?          @relation("AccountTree", fields: [parentId], references: [id])
+  children     Account[]         @relation("AccountTree")
+  lines        TransactionLine[]
+  categories   ExpenseCategory[]
+  bankAccounts BankAccount[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+  @@index([organizationId, type])
+}
+
+model Transaction {
+  id             String          @id @default(cuid())
+  organizationId String
+  voucherNumber  String
+  date           DateTime
+  type           TransactionType
+  narration      String?
+  amount         Decimal         @db.Decimal(14, 2)
+  sourceType     String?
+  sourceId       String?
+  isReversal     Boolean         @default(false)
+  reversedFromId String?
+  createdById    String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?             @relation(fields: [createdById], references: [id])
+  lines        TransactionLine[]
+  expense      Expense?          @relation(fields: [expenseId], references: [id])
+  expenseId    String?
+
+  @@unique([organizationId, voucherNumber])
+  @@index([organizationId, date])
+  @@index([organizationId, type])
+  @@index([sourceType, sourceId])
+}
+
+model TransactionLine {
+  id            String  @id @default(cuid())
+  transactionId String
+  accountId     String
+  debit         Decimal @default(0) @db.Decimal(14, 2)
+  credit        Decimal @default(0) @db.Decimal(14, 2)
+  description   String?
+  fundId        String?
+  departmentId  String?
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  account     Account     @relation(fields: [accountId], references: [id])
+
+  @@index([transactionId])
+  @@index([accountId])
+}
+
+model BankAccount {
+  id             String          @id @default(cuid())
+  organizationId String
+  name           String
+  accountType    BankAccountType @default(BANK)
+  bankName       String?
+  accountNumber  String?
+  ifsc           String?
+  branch         String?
+  upiId          String?
+  accountId      String?
+  openingBalance Decimal         @default(0) @db.Decimal(14, 2)
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  account       Account?       @relation(fields: [accountId], references: [id])
+  payments      Payment[]
+  donations     Donation[]
+  incomeEntries IncomeEntry[]
+  transfersOut  BankTransfer[] @relation("TransferFrom")
+  transfersIn   BankTransfer[] @relation("TransferTo")
+
+  @@index([organizationId])
+}
+
+model BankTransfer {
+  id              String   @id @default(cuid())
+  organizationId  String
+  transferNumber  String
+  date            DateTime
+  fromAccountId   String
+  toAccountId     String
+  amount          Decimal  @db.Decimal(14, 2)
+  referenceNumber String?
+  notes           String?
+  createdById     String?
+  createdAt       DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  fromAccount  BankAccount  @relation("TransferFrom", fields: [fromAccountId], references: [id])
+  toAccount    BankAccount  @relation("TransferTo", fields: [toAccountId], references: [id])
+  createdBy    User?        @relation(fields: [createdById], references: [id])
+
+  @@unique([organizationId, transferNumber])
+  @@index([organizationId, date])
+}
+
+// ----------------------------- Expenses ------------------------------------
+
+model Expense {
+  id              String         @id @default(cuid())
+  organizationId  String
+  expenseNumber   String
+  date            DateTime
+  departmentId    String
+  fundId          String
+  costCenterId    String?
+  categoryId      String
+  supplierId      String?
+  subtotal        Decimal        @default(0) @db.Decimal(14, 2)
+  tax             Decimal        @default(0) @db.Decimal(14, 2)
+  total           Decimal        @default(0) @db.Decimal(14, 2)
+  paidAmount      Decimal        @default(0) @db.Decimal(14, 2)
+  status          ExpenseStatus  @default(DRAFT)
+  paymentStatus   PaymentStatus  @default(UNPAID)
+  paymentMethod   PaymentMethod?
+  paymentAccountId String?
+  referenceNumber String?
+  paymentDate     DateTime?
+  payImmediately  Boolean        @default(false)
+  description     String?
+  notes           String?
+  title           String
+  rejectionReason String?
+  submittedAt     DateTime?
+  approvedAt      DateTime?
+  revisionOf      String?
+  revisionNumber  Int            @default(1)
+  createdById     String
+  onBehalfOfId    String?
+  approvedById    String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  department   Department      @relation(fields: [departmentId], references: [id])
+  fund         Fund            @relation(fields: [fundId], references: [id])
+  costCenter   CostCenter?     @relation(fields: [costCenterId], references: [id])
+  category     ExpenseCategory @relation(fields: [categoryId], references: [id])
+  supplier     Supplier?       @relation(fields: [supplierId], references: [id])
+  createdBy    User            @relation("ExpenseCreatedBy", fields: [createdById], references: [id])
+  approvedBy   User?           @relation("ExpenseApprovedBy", fields: [approvedById], references: [id])
+  onBehalfOf   User?           @relation("ExpenseOnBehalfOf", fields: [onBehalfOfId], references: [id])
+
+  items        ExpenseItem[]
+  payments     Payment[]
+  attachments  Attachment[]
+  approvals    Approval[]
+  transactions Transaction[]
+
+  @@unique([organizationId, expenseNumber])
+  @@index([organizationId, status])
+  @@index([organizationId, date])
+  @@index([organizationId, departmentId])
+  @@index([organizationId, fundId])
+  @@index([organizationId, supplierId])
+  @@index([organizationId, onBehalfOfId])
+  @@index([organizationId, createdById])
+}
+
+model ExpenseItem {
+  id          String  @id @default(cuid())
+  expenseId   String
+  description String
+  quantity    Decimal @default(1) @db.Decimal(14, 3)
+  unit        String  @default("NOS")
+  rate        Decimal @default(0) @db.Decimal(14, 2)
+  taxRate     Decimal @default(0) @db.Decimal(6, 2)
+  taxAmount   Decimal @default(0) @db.Decimal(14, 2)
+  amount      Decimal @default(0) @db.Decimal(14, 2)
+  sortOrder   Int     @default(0)
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+
+  @@index([expenseId])
+}
+
+model Payment {
+  id              String        @id @default(cuid())
+  organizationId  String
+  paymentNumber   String
+  expenseId       String?
+  date            DateTime
+  amount          Decimal       @db.Decimal(14, 2)
+  method          PaymentMethod
+  bankAccountId   String?
+  referenceNumber String?
+  notes           String?
+  createdById     String
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  expense      Expense?     @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  bankAccount  BankAccount? @relation(fields: [bankAccountId], references: [id])
+  createdBy    User         @relation(fields: [createdById], references: [id])
+
+  @@unique([organizationId, paymentNumber])
+  @@index([organizationId, date])
+  @@index([expenseId])
+}
+
+model Approval {
+  id             String           @id @default(cuid())
+  organizationId String
+  expenseId      String
+  level          Int              @default(1)
+  decision       ApprovalDecision @default(PENDING)
+  requestedById  String
+  actorId        String?
+  comments       String?
+  requestedAt    DateTime         @default(now())
+  decidedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  expense      Expense      @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  requestedBy  User         @relation("ApprovalRequester", fields: [requestedById], references: [id])
+  actor        User?        @relation("ApprovalActor", fields: [actorId], references: [id])
+
+  @@index([organizationId, decision])
+  @@index([expenseId])
+}
+
+model Attachment {
+  id             String         @id @default(cuid())
+  organizationId String
+  expenseId      String?
+  donationId     String?
+  kind           AttachmentKind @default(SUPPORTING)
+  fileName       String
+  storageKey     String
+  mimeType       String
+  size           Int
+  uploadedById   String
+  createdAt      DateTime       @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  expense      Expense?     @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  donation     Donation?    @relation(fields: [donationId], references: [id], onDelete: Cascade)
+  uploadedBy   User         @relation(fields: [uploadedById], references: [id])
+
+  @@index([organizationId])
+  @@index([expenseId])
+}
+
+// ----------------------------- Income & donations --------------------------
+
+model Donation {
+  id              String       @id @default(cuid())
+  organizationId  String
+  receiptNumber   String
+  date            DateTime
+  donorId         String?
+  donorName       String
+  amount          Decimal      @db.Decimal(14, 2)
+  mode            DonationMode @default(CASH)
+  fundId          String
+  departmentId    String?
+  bankAccountId   String?
+  purpose         String?
+  referenceNumber String?
+  is80GEligible   Boolean      @default(true)
+  notes           String?
+  createdById     String
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  donor        Donor?       @relation(fields: [donorId], references: [id])
+  fund         Fund         @relation(fields: [fundId], references: [id])
+  department   Department?  @relation(fields: [departmentId], references: [id])
+  bankAccount  BankAccount? @relation(fields: [bankAccountId], references: [id])
+  createdBy    User         @relation(fields: [createdById], references: [id])
+  attachments  Attachment[]
+
+  @@unique([organizationId, receiptNumber])
+  @@index([organizationId, date])
+  @@index([organizationId, fundId])
+}
+
+model IncomeEntry {
+  id             String   @id @default(cuid())
+  organizationId String
+  entryNumber    String
+  date           DateTime
+  source         String
+  amount         Decimal  @db.Decimal(14, 2)
+  fundId         String
+  departmentId   String?
+  bankAccountId  String?
+  method         PaymentMethod @default(BANK_TRANSFER)
+  referenceNumber String?
+  notes          String?
+  createdById    String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  fund         Fund         @relation(fields: [fundId], references: [id])
+  department   Department?  @relation(fields: [departmentId], references: [id])
+  bankAccount  BankAccount? @relation(fields: [bankAccountId], references: [id])
+  createdBy    User         @relation(fields: [createdById], references: [id])
+
+  @@unique([organizationId, entryNumber])
+  @@index([organizationId, date])
+}
+
+// ----------------------------- Purchases -----------------------------------
+
+model PurchaseOrder {
+  id             String         @id @default(cuid())
+  organizationId String
+  orderNumber    String
+  date           DateTime
+  expectedDate   DateTime?
+  supplierId     String
+  departmentId   String
+  fundId         String
+  categoryId     String?
+  subtotal       Decimal        @default(0) @db.Decimal(14, 2)
+  tax            Decimal        @default(0) @db.Decimal(14, 2)
+  total          Decimal        @default(0) @db.Decimal(14, 2)
+  status         PurchaseStatus @default(DRAFT)
+  notes          String?
+  createdById    String
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  supplier     Supplier            @relation(fields: [supplierId], references: [id])
+  department   Department          @relation(fields: [departmentId], references: [id])
+  fund         Fund                @relation(fields: [fundId], references: [id])
+  category     ExpenseCategory?    @relation(fields: [categoryId], references: [id])
+  createdBy    User                @relation(fields: [createdById], references: [id])
+  items        PurchaseOrderItem[]
+
+  @@unique([organizationId, orderNumber])
+  @@index([organizationId, status])
+  @@index([organizationId, date])
+}
+
+model PurchaseOrderItem {
+  id              String  @id @default(cuid())
+  purchaseOrderId String
+  description     String
+  quantity        Decimal @default(1) @db.Decimal(14, 3)
+  unit            String  @default("NOS")
+  rate            Decimal @default(0) @db.Decimal(14, 2)
+  taxRate         Decimal @default(0) @db.Decimal(6, 2)
+  amount          Decimal @default(0) @db.Decimal(14, 2)
+  sortOrder       Int     @default(0)
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+
+  @@index([purchaseOrderId])
+}
+
+// ----------------------------- Platform ------------------------------------
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String?
+  action         String
+  entityType     String
+  entityId       String?
+  entityLabel    String?
+  oldValue       Json?
+  newValue       Json?
+  ipAddress      String?
+  userAgent      String?
+  timestamp      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id])
+
+  @@index([organizationId, timestamp])
+  @@index([organizationId, entityType, entityId])
+  @@index([organizationId, action])
+}
+
+model Notification {
+  id             String           @id @default(cuid())
+  organizationId String
+  userId         String
+  type           NotificationType
+  title          String
+  message        String
+  link           String?
+  entityType     String?
+  entityId       String?
+  isRead         Boolean          @default(false)
+  readAt         DateTime?
+  createdAt      DateTime         @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, userId, isRead])
+  @@index([createdAt])
+}
+
+model Report {
+  id             String       @id @default(cuid())
+  organizationId String
+  key            String
+  name           String
+  filters        Json
+  status         ReportStatus @default(READY)
+  rowCount       Int          @default(0)
+  summary        Json?
+  generatedById  String
+  createdAt      DateTime     @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  generatedBy  User         @relation(fields: [generatedById], references: [id])
+
+  @@index([organizationId, key])
+  @@index([organizationId, createdAt])
+}
+
+model OrgSetting {
+  id             String   @id @default(cuid())
+  organizationId String
+  key            String
+  value          Json
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+}
+
+// ----------------------------- WhatsApp ------------------------------------
+
+/// One messaging channel per organization. Credentials and the linked-device
+/// session are stored AES-256-GCM encrypted — never in the clear.
+model WhatsAppChannel {
+  id             String            @id @default(cuid())
+  organizationId String            @unique
+  activeProvider WhatsAppProvider?
+
+  cloudPhoneNumberId     String?
+  cloudBusinessAccountId String?
+  cloudTokenCiphertext   Bytes?
+  cloudTokenIv           Bytes?
+  cloudTokenTag          Bytes?
+  cloudDisplayNumber     String?
+  cloudVerifiedName      String?
+  cloudStatus            WhatsAppConnectionStatus @default(DISCONNECTED)
+  cloudLastError         String?
+  cloudConnectedAt       DateTime?
+
+  webStatus            WhatsAppConnectionStatus @default(DISCONNECTED)
+  webPhoneNumber       String?
+  webDisplayName       String?
+  webSessionCiphertext Bytes?
+  webSessionIv         Bytes?
+  webSessionTag        Bytes?
+  webConnectedAt       DateTime?
+  webLastActiveAt      DateTime?
+  webLastError         String?
+
+  monthlyLimit Int     @default(250)
+  messagesSent Int     @default(0)
+  countedMonth String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([cloudPhoneNumberId])
+  @@index([webStatus])
+}
+
+model WhatsAppBroadcast {
+  id               String                  @id @default(cuid())
+  organizationId   String
+  name             String
+  provider         WhatsAppProvider
+  body             String?
+  templateName     String?
+  templateLanguage String?
+  templateParams   String[]                @default([])
+  status           WhatsAppBroadcastStatus @default(QUEUED)
+  totalRecipients  Int                     @default(0)
+  sentCount        Int                     @default(0)
+  failedCount      Int                     @default(0)
+  skippedCount     Int                     @default(0)
+  createdById      String
+  createdAt        DateTime                @default(now())
+  startedAt        DateTime?
+  completedAt      DateTime?
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User              @relation(fields: [createdById], references: [id])
+  messages     WhatsAppMessage[]
+
+  @@index([organizationId, createdAt])
+  @@index([status])
+}
+
+model WhatsAppMessage {
+  id                String                @id @default(cuid())
+  organizationId    String
+  donorId           String?
+  broadcastId       String?
+  direction         WhatsAppDirection     @default(OUTBOUND)
+  provider          WhatsAppProvider
+  phone             String
+  body              String?
+  templateName      String?
+  status            WhatsAppMessageStatus @default(QUEUED)
+  providerMessageId String?
+  error             String?
+  sentById          String?
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  readAt            DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  donor        Donor?             @relation(fields: [donorId], references: [id], onDelete: SetNull)
+  broadcast    WhatsAppBroadcast? @relation(fields: [broadcastId], references: [id], onDelete: SetNull)
+  sentBy       User?              @relation(fields: [sentById], references: [id])
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, donorId])
+  @@index([broadcastId, status])
+  @@index([providerMessageId])
+}

@@ -1,0 +1,58 @@
+{
+  "name": "ashram-management",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Ashram Management - Financial and administrative management for trusts, ashrams, charitable and educational organizations",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build:types && concurrently -n api,web -c green,cyan \"npm run dev -w @ashram/api\" \"npm run dev -w @ashram/web\"",
+    "build": "npm run build:types && npm run build -w @ashram/api && npm run build -w @ashram/web",
+    "start": "npm run start -w @ashram/api",
+    "db:generate": "prisma generate --schema database/schema/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema database/schema/schema.prisma",
+    "db:deploy": "prisma migrate deploy --schema database/schema/schema.prisma",
+    "db:push": "prisma db push --schema database/schema/schema.prisma",
+    "db:reset": "prisma migrate reset --force --schema database/schema/schema.prisma",
+    "db:studio": "prisma studio --schema database/schema/schema.prisma",
+    "db:seed": "tsx database/seed/seed.ts",
+    "setup": "npm run build:types && npm run db:generate && npm run db:deploy && npm run db:seed",
+    "test": "npm run test -w @ashram/api",
+    "test:e2e": "npm run test:e2e -w @ashram/api",
+    "typecheck": "npm run typecheck -w @ashram/api && npm run typecheck -w @ashram/web",
+    "qa": "tsx tests/visual-qa.ts",
+    "qa:workflow": "tsx tests/ui-workflow.ts",
+    "build:types": "npm run build -w @ashram/types",
+    "prepare": "npm run build:types"
+  },
+  "prisma": {
+    "schema": "database/schema/schema.prisma",
+    "seed": "tsx database/seed/seed.ts"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "concurrently": "^9.0.1",
+    "playwright": "^1.48.0",
+    "prisma": "^5.20.0",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.21.5": true,
+    "prisma@5.22.0": true,
+    "@prisma/client@5.22.0": true,
+    "@prisma/engines@5.22.0": true,
+    "fsevents@2.3.3": true,
+    "@whiskeysockets/baileys@7.0.0-rc14": true,
+    "protobufjs@7.6.6": true
+  }
+}
