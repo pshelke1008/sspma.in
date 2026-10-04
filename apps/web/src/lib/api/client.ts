@@ -126,6 +126,39 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
   URL.revokeObjectURL(url);
 }
 
+/** Hands an in-memory blob to the browser as a download. */
+export function saveBlob(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  // Revoke on the next tick so Safari has started the download first.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/**
+ * POSTs a JSON body through the authenticated API and downloads the binary
+ * response (used by the list "Export → Excel" action). `contentType` lets a
+ * route opt into its own body parser for large payloads.
+ */
+export async function downloadPost(
+  path: string,
+  body: unknown,
+  fileName: string,
+  options: { contentType?: string } = {},
+): Promise<void> {
+  const response = await request<Response>(path, {
+    method: 'POST',
+    body,
+    raw: true,
+    headers: options.contentType ? { 'Content-Type': options.contentType } : undefined,
+  });
+  saveBlob(await response.blob(), fileName);
+}
+
 export function fileUrl(path: string): string {
   return `${API_URL}${path}`;
 }

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { FileText } from 'lucide-react';
 import { useAuth } from '@/lib/auth/AuthProvider';
 import { useApprovalCount } from '@/lib/api/hooks';
+import { useInboxUnreadCount } from '@/features/whatsapp/inbox/api';
 import { cn } from '@/lib/utils/cn';
 import { NAV_ITEMS } from './navigation';
 import { Brand } from './Brand';
@@ -18,13 +19,15 @@ export function SidebarNav({ onNavigate, className }: { onNavigate?: () => void;
   const { t } = useTranslation();
   const { can } = useAuth();
   const { data: approvals } = useApprovalCount(can('expense.approve'));
+  const { data: inboxUnread } = useInboxUnreadCount(can('whatsapp.inbox'));
   const items = NAV_ITEMS.filter((item) => can(...item.permission));
 
   return (
     <nav className={cn('flex-1 space-y-0.5 overflow-y-auto px-3 py-3', className)} aria-label={t('nav.main')}>
       {items.map((item) => {
         const Icon = item.icon;
-        const badgeCount = item.badge === 'approvals' ? (approvals?.count ?? 0) : 0;
+        const badgeCount =
+          item.badge === 'approvals' ? (approvals?.count ?? 0) : item.badge === 'whatsapp' ? (inboxUnread?.count ?? 0) : 0;
         return (
           <NavLink key={item.to} to={item.to} end={item.end} onClick={onNavigate} className={({ isActive }) => linkClass(isActive)}>
             {() => (
@@ -34,7 +37,11 @@ export function SidebarNav({ onNavigate, className }: { onNavigate?: () => void;
                 {badgeCount > 0 && (
                   <span
                     className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1 text-[10.5px] font-semibold text-ink"
-                    aria-label={t('nav.pending', { count: badgeCount })}
+                    aria-label={
+                      item.badge === 'whatsapp'
+                        ? t('whatsappInbox.unreadBadge', { count: badgeCount })
+                        : t('nav.pending', { count: badgeCount })
+                    }
                   >
                     {badgeCount > 99 ? '99+' : badgeCount}
                   </span>
@@ -70,7 +77,7 @@ export function Sidebar() {
       aria-label={t('nav.navigation')}
     >
       <div className="flex h-16 shrink-0 items-center border-b border-line px-4">
-        <Brand tone="dark" />
+        <Brand />
       </div>
       <SidebarNav />
       <div className="border-t border-line px-4 py-3">

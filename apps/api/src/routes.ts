@@ -15,8 +15,11 @@ import { purchasesRouter } from './modules/purchases/purchases.routes';
 import { bankingRouter } from './modules/banking/banking.routes';
 import { reportsRouter } from './modules/reports/reports.routes';
 import { donorsRouter } from './modules/donors/donor.routes';
+import { donorImportRouter } from './modules/donors/donor.import';
 import { whatsappRouter } from './modules/whatsapp/whatsapp.routes';
 import { whatsappWebhookRouter } from './modules/whatsapp/webhook.routes';
+import { whatsappOAuthCallbackRouter } from './modules/whatsapp/oauth.routes';
+import { exportsRouter } from './modules/exports/exports.routes';
 
 export const apiRouter = Router();
 
@@ -28,6 +31,8 @@ apiRouter.get('/health', (_req, res) => {
 apiRouter.use('/auth', authRouter);
 // Authenticated by Meta's request signature rather than a session.
 apiRouter.use('/webhooks/whatsapp', whatsappWebhookRouter);
+// Meta's browser redirect after "Connect with Facebook"; authenticated by a signed state.
+apiRouter.use('/whatsapp/oauth/callback', whatsappOAuthCallbackRouter);
 
 // Everything below requires a valid session, and every handler derives its
 // organizationId from that session rather than from the request body.
@@ -48,5 +53,7 @@ apiRouter.use('/income', incomeRouter);
 apiRouter.use('/purchases', purchasesRouter);
 apiRouter.use('/banking', bankingRouter);
 apiRouter.use('/reports', reportsRouter);
+apiRouter.use('/donors/import', donorImportRouter);
 apiRouter.use('/donors', donorsRouter);
 apiRouter.use('/whatsapp', whatsappRouter);
+apiRouter.use('/exports', exportsRouter);

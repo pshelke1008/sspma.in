@@ -155,3 +155,20 @@ export async function readFile(key: string): Promise<Buffer> {
 export async function removeFile(key: string): Promise<void> {
   await getDriver().remove(key);
 }
+
+/**
+ * Stores a file that did not come from a user upload — WhatsApp media fetched
+ * from Meta, which may be audio, video or any document type. It skips the
+ * upload allowlist, so it must only be served back as a download (never inline
+ * as HTML) by the route that reads it.
+ */
+export async function storeRawFile(
+  organizationId: string,
+  scope: string,
+  file: { fileName: string; mimeType: string; buffer: Buffer },
+): Promise<StoredFile> {
+  const fileName = safeName(file.fileName);
+  const key = `org/${organizationId}/${scope}/${Date.now()}-${crypto.randomBytes(8).toString('hex')}-${fileName}`;
+  await getDriver().put(key, file.buffer, file.mimeType);
+  return { key, fileName, mimeType: file.mimeType, size: file.buffer.length };
+}

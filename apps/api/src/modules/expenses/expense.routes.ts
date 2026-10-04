@@ -131,7 +131,9 @@ expenseRouter.post(
 
 expenseRouter.post(
   '/:id/revise',
+  // Revising reverses a posted voucher, so it needs both rights — matching the UI rule.
   requirePermission('expense.edit'),
+  requirePermission('expense.approve'),
   validate(reviseSchema),
   asyncHandler(async (req, res) => {
     res.status(201).json(await service.reviseExpense(getCurrentUser(req), req.params.id, req.body.reason, req));

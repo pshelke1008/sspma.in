@@ -1,18 +1,50 @@
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { prisma } from '../../db';
-import { notFound } from '../../lib/errors';
+import { conflict, notFound } from '../../lib/errors';
 import { round2, toNumber } from '../../lib/money';
 import { nextMasterCode } from '../../lib/sequence';
 import { AUDIT_ACTIONS, recordAudit } from '../../lib/audit';
 import type { AuthContext } from '../../middleware/auth';
+import { maskAadhaar, normalizeAadhaar } from '@ashram/types';
 import { normalizePhone } from '../whatsapp/phone';
-import type { DonorInput, ListDonorsQuery } from './donor.schema';
+import type { DonorInput, DonorWithDonationInput, ListDonorsQuery, LocationsQuery } from './donor.schema';
+import { auditDonation, recordDonation } from '../donations/donation.service';
+import { linkConversationsToDonor } from '../whatsapp/link';
 
 export interface DonorStats {
   totalDonated: number;
   donationCount: number;
   lastDonationAt: Date | null;
+}
+
+/**
+ * Place names are filtered on exactly, so stray spaces would split one village
+ * into two filter options. Case is left as typed (Marathi has none anyway).
+ */
+export function tidyPlace(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const tidy = value.trim().replace(/\s+/g, ' ');
+  return tidy || null;
+}
+
+/**
+ * A donor as the API returns it: the Aadhaar number replaced by its masked
+ * form. Every response that carries a donor row goes through this.
+ */
+export function publicDonor<T extends { aadhaarNumber?: string | null }>(donor: T) {
+  const { aadhaarNumber, ...rest } = donor;
+  return { ...rest, aadhaarMasked: maskAadhaar(aadhaarNumber) };
+}
+
+/**
+ * Aadhaar on save: undefined leaves the stored number as it is (the form never
+ * receives it back, so an untouched field must not wipe it); an empty string
+ * removes it.
+ */
+function aadhaarData(value: string | null | undefined) {
+  if (value === undefined) return {};
+  return { aadhaarNumber: value ? normalizeAadhaar(value) : null };
 }
 
 /** Blank strings from forms become nulls; dates arrive already coerced. */
@@ -26,10 +58,12 @@ function toData(input: DonorInput) {
     whatsappNumber: blank(input.whatsappNumber) as string | null,
     alternatePhone: blank(input.alternatePhone) as string | null,
     panNumber: blank(input.panNumber) as string | null,
+    ...aadhaarData(input.aadhaarNumber),
     addressLine1: blank(input.addressLine1) as string | null,
     addressLine2: blank(input.addressLine2) as string | null,
-    city: blank(input.city) as string | null,
-    state: blank(input.state) as string | null,
+    state: tidyPlace(input.state),
+    district: tidyPlace(input.district),
+    village: tidyPlace(input.village),
     postalCode: blank(input.postalCode) as string | null,
     country: input.country || 'India',
     dateOfBirth: (blank(input.dateOfBirth) as Date | null) ?? null,
@@ -76,6 +110,9 @@ function buildWhere(organizationId: string, query: ListDonorsQuery): Prisma.Dono
     ...(query.category ? { category: query.category } : {}),
     ...(query.tag ? { tags: { has: query.tag } } : {}),
     ...(query.optIn ? { whatsappOptIn: query.optIn === 'yes' } : {}),
+    ...(query.state ? { state: { equals: query.state, mode: 'insensitive' } } : {}),
+    ...(query.district ? { district: { equals: query.district, mode: 'insensitive' } } : {}),
+    ...(query.village ? { village: { equals: query.village, mode: 'insensitive' } } : {}),
     ...(query.search
       ? {
           OR: [
@@ -84,7 +121,8 @@ function buildWhere(organizationId: string, query: ListDonorsQuery): Prisma.Dono
             { phone: { contains: query.search } },
             { whatsappNumber: { contains: query.search } },
             { email: { contains: query.search, mode: 'insensitive' } },
-            { city: { contains: query.search, mode: 'insensitive' } },
+            { village: { contains: query.search, mode: 'insensitive' } },
+            { district: { contains: query.search, mode: 'insensitive' } },
             { panNumber: { contains: query.search, mode: 'insensitive' } },
           ],
         }
@@ -94,6 +132,29 @@ function buildWhere(organizationId: string, query: ListDonorsQuery): Prisma.Dono
 
 export async function listDonors(organizationId: string, query: ListDonorsQuery) {
   const where = buildWhere(organizationId, query);
+
+  // Numbers are stored as typed ("+91 98200 11223"), so a plain `contains`
+  // misses "9820011223". Match the digits alone as well, with or without the
+  // country code / trunk zero the person searching may have typed.
+  const digits = query.search?.replace(/\D/g, '') ?? '';
+  if (digits.length >= 4 && Array.isArray(where.OR)) {
+    const variants = new Set([digits]);
+    if (digits.length > 10 && digits.startsWith('91')) variants.add(digits.slice(2));
+    if (digits.length > 10 && digits.startsWith('0')) variants.add(digits.slice(1));
+    const patterns = Array.from(variants).map((variant) => `%${variant}%`);
+    const phoneMatches = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM "Donor"
+      WHERE "organizationId" = ${organizationId}
+        AND (
+          regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ANY(${patterns})
+          OR regexp_replace(COALESCE("whatsappNumber", ''), '[^0-9]', '', 'g') LIKE ANY(${patterns})
+          OR regexp_replace(COALESCE("alternatePhone", ''), '[^0-9]', '', 'g') LIKE ANY(${patterns})
+        )
+      LIMIT 500
+    `;
+    if (phoneMatches.length > 0) where.OR = [...where.OR, { id: { in: phoneMatches.map((row) => row.id) } }];
+  }
+
   const skip = (query.page - 1) * query.pageSize;
   const total = await prisma.donor.count({ where });
 
@@ -150,7 +211,7 @@ export async function listDonors(organizationId: string, query: ListDonorsQuery)
     .map((donor) => {
       const number = messagingNumber(donor);
       return {
-        ...donor,
+        ...publicDonor(donor),
         stats: stats.get(donor.id) ?? { totalDonated: 0, donationCount: 0, lastDonationAt: null },
         messaging: { number, canMessage: donor.isActive && donor.whatsappOptIn && Boolean(number) },
       };
@@ -242,7 +303,7 @@ export async function getDonorProfile(organizationId: string, id: string) {
   const number = messagingNumber(donor);
 
   return {
-    ...donor,
+    ...publicDonor(donor),
     stats: {
       totalDonated,
       donationCount,
@@ -277,11 +338,16 @@ export async function getDonorProfile(organizationId: string, id: string) {
   };
 }
 
-export async function createDonor(auth: AuthContext, input: DonorInput, req: Request) {
+/** The donation part of a donor-form save, recorded against the donor just written. */
+type FormDonation = DonorWithDonationInput['donation'];
+
+export async function createDonor(auth: AuthContext, input: DonorInput, req: Request, donationInput?: FormDonation) {
   const data = toData(input);
-  const donor = await prisma.$transaction(async (tx) => {
+  // Donor and donation are one save: if the donation is refused, the donor is
+  // not created either, so retrying never produces a duplicate donor.
+  const { donor, donation } = await prisma.$transaction(async (tx) => {
     const code = await nextMasterCode(tx, auth.organizationId, 'DONOR', 'DNR');
-    return tx.donor.create({
+    const created = await tx.donor.create({
       data: {
         ...data,
         organizationId: auth.organizationId,
@@ -290,6 +356,10 @@ export async function createDonor(auth: AuthContext, input: DonorInput, req: Req
         createdById: auth.userId,
       },
     });
+    const gift = donationInput
+      ? await recordDonation(tx, auth, { ...donationInput, donorId: created.id, donorName: created.name })
+      : null;
+    return { donor: created, donation: gift };
   });
 
   await recordAudit({
@@ -302,11 +372,14 @@ export async function createDonor(auth: AuthContext, input: DonorInput, req: Req
     newValue: { name: donor.name, whatsappOptIn: donor.whatsappOptIn },
     req,
   });
+  if (donation) await auditDonation(auth, donation, req);
+  // Earlier WhatsApp messages from this donor's numbers join their profile.
+  await linkConversationsToDonor(auth.organizationId, donor.id, [donor.whatsappNumber, donor.phone, donor.alternatePhone]);
 
-  return donor;
+  return { ...publicDonor(donor), donation: donation ? { id: donation.id, receiptNumber: donation.receiptNumber } : null };
 }
 
-export async function updateDonor(auth: AuthContext, id: string, input: DonorInput, req: Request) {
+export async function updateDonor(auth: AuthContext, id: string, input: DonorInput, req: Request, donationInput?: FormDonation) {
   const existing = await prisma.donor.findFirst({ where: { id, organizationId: auth.organizationId } });
   if (!existing) throw notFound('Donor not found');
 
@@ -320,7 +393,13 @@ export async function updateDonor(auth: AuthContext, id: string, input: DonorInp
         ? new Date()
         : null;
 
-  const donor = await prisma.donor.update({ where: { id }, data: { ...data, whatsappOptInAt } });
+  const { donor, donation } = await prisma.$transaction(async (tx) => {
+    const updated = await tx.donor.update({ where: { id }, data: { ...data, whatsappOptInAt } });
+    const gift = donationInput
+      ? await recordDonation(tx, auth, { ...donationInput, donorId: updated.id, donorName: updated.name })
+      : null;
+    return { donor: updated, donation: gift };
+  });
 
   await recordAudit({
     organizationId: auth.organizationId,
@@ -333,8 +412,11 @@ export async function updateDonor(auth: AuthContext, id: string, input: DonorInp
     newValue: { name: donor.name, phone: donor.phone, whatsappOptIn: donor.whatsappOptIn },
     req,
   });
+  if (donation) await auditDonation(auth, donation, req);
+  // Earlier WhatsApp messages from this donor's numbers join their profile.
+  await linkConversationsToDonor(auth.organizationId, donor.id, [donor.whatsappNumber, donor.phone, donor.alternatePhone]);
 
-  return donor;
+  return { ...publicDonor(donor), donation: donation ? { id: donation.id, receiptNumber: donation.receiptNumber } : null };
 }
 
 /** Donors are deactivated, never deleted — their receipts must stay attributable. */
@@ -355,5 +437,73 @@ export async function setDonorActive(auth: AuthContext, id: string, isActive: bo
     req,
   });
 
-  return donor;
+  return publicDonor(donor);
+}
+
+/**
+ * Permanently removes a donor who has no donations. A donor with donations is
+ * refused: receipts and 80G records must stay attributable, so those donors are
+ * deactivated instead. Messages sent to the donor keep their history with the
+ * donor link cleared.
+ */
+export async function deleteDonor(auth: AuthContext, id: string, req: Request) {
+  const existing = await prisma.donor.findFirst({
+    where: { id, organizationId: auth.organizationId },
+    include: { _count: { select: { donations: true } } },
+  });
+  if (!existing) throw notFound('Donor not found');
+
+  const donationCount = existing._count.donations;
+  if (donationCount > 0) {
+    throw conflict(
+      `This donor has ${donationCount} donation${donationCount === 1 ? '' : 's'} on record, so they can't be deleted. Deactivate them instead.`,
+      { reason: 'HAS_DONATIONS', donationCount },
+    );
+  }
+
+  await prisma.donor.delete({ where: { id: existing.id } });
+
+  await recordAudit({
+    organizationId: auth.organizationId,
+    userId: auth.userId,
+    action: AUDIT_ACTIONS.DONOR_DELETED,
+    entityType: 'Donor',
+    entityId: existing.id,
+    entityLabel: `${existing.code} ${existing.name}`,
+    oldValue: { name: existing.name, code: existing.code, phone: existing.phone, panNumber: existing.panNumber },
+    req,
+  });
+}
+
+/**
+ * States, districts and villages already recorded for this organization, with
+ * donor counts — the options for the location filters and form suggestions.
+ * Districts are narrowed to the chosen state and villages to the chosen
+ * district, so each list stays short.
+ */
+export async function donorLocations(organizationId: string, query: LocationsQuery) {
+  const base: Prisma.DonorWhereInput = { organizationId };
+  const inState: Prisma.DonorWhereInput = query.state
+    ? { ...base, state: { equals: query.state, mode: 'insensitive' } }
+    : base;
+  const inDistrict: Prisma.DonorWhereInput = query.district
+    ? { ...inState, district: { equals: query.district, mode: 'insensitive' } }
+    : inState;
+
+  const [states, districts, villages] = await Promise.all([
+    prisma.donor.groupBy({ by: ['state'], where: { ...base, state: { not: null } }, _count: { _all: true } }),
+    prisma.donor.groupBy({ by: ['district'], where: { ...inState, district: { not: null } }, _count: { _all: true } }),
+    prisma.donor.groupBy({ by: ['village'], where: { ...inDistrict, village: { not: null } }, _count: { _all: true } }),
+  ]);
+
+  const options = <T extends Record<string, unknown>>(rows: (T & { _count: { _all: number } })[], key: keyof T) =>
+    rows
+      .map((row) => ({ value: row[key] as string, count: row._count._all }))
+      .sort((a, b) => a.value.localeCompare(b.value, 'en', { sensitivity: 'base' }));
+
+  return {
+    states: options(states, 'state'),
+    districts: options(districts, 'district'),
+    villages: options(villages, 'village'),
+  };
 }

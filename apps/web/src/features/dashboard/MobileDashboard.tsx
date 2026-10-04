@@ -27,7 +27,7 @@ export function MobileDashboard({ data, isLoading }: { data?: DashboardData; isL
       {/* Brand + profile strip */}
       <header className="-mx-3 -mt-4 mb-4 bg-brand px-4 pb-16 pt-4 text-white">
         <div className="flex items-center justify-between">
-          <Brand size="sm" showTagline={false} />
+          <Brand size="sm" />
           <div className="flex items-center gap-2">
             <Link
               to="/approvals"

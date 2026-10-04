@@ -20,7 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Input, Textarea } from '@/components/ui/input';
 import { SimpleSelect } from '@/components/ui/select';
 import { DateInput, FormField, MoneyInput } from '@/components/common/forms';
-import { formatCurrency } from '@/lib/utils/format';
+import { formatCurrency, todayLocal } from '@/lib/utils/format';
 import { useTranslation } from 'react-i18next';
 import { useLabels } from '@/i18n/useLabels';
 import { errorMessage } from '@/i18n/errors';
@@ -76,7 +76,7 @@ export function RecordPaymentDialog({
     defaultValues: {
       amount: expense.balanceDue,
       method: 'BANK_TRANSFER',
-      paymentDate: new Date().toISOString().slice(0, 10),
+      paymentDate: todayLocal(),
       bankAccountId: '',
       referenceNumber: '',
       notes: '',

@@ -19,8 +19,10 @@ import { AUDIT_ACTIONS, recordAudit } from '../../lib/audit';
 import type { AuthContext } from '../../middleware/auth';
 import * as cloud from './cloudApi';
 import * as manager from './connectionManager';
-import { decryptText, encryptText, hasEncryptionKey } from './crypto';
+import { hasEncryptionKey } from './crypto';
 import { WhatsAppError, WhatsAppErrorCode } from './errors';
+import { oauthAvailable } from './oauth.service';
+import * as numbers from './numbers.service';
 
 const currentMonth = () => new Date().toISOString().slice(0, 7);
 
@@ -43,6 +45,9 @@ function assertWebEnabled() {
 
 export async function getStatus(organizationId: string) {
   const channel = await getOrCreateChannel(organizationId);
+  const connectedNumbers = await numbers.listNumbers(organizationId);
+  const primary = connectedNumbers[0] ?? null;
+  const cloudStatus = connectedNumbers.length ? 'CONNECTED' : channel.cloudLastError ? 'FAILED' : 'DISCONNECTED';
   const configured = hasEncryptionKey();
 
   // The socket is the truth for QR-linking; the row outlives crashes.
@@ -70,15 +75,23 @@ export async function getStatus(organizationId: string) {
     configured,
     activeProvider,
     cloud: {
-      status: channel.cloudStatus,
-      phoneNumberId: channel.cloudPhoneNumberId,
-      businessAccountId: channel.cloudBusinessAccountId,
-      displayNumber: channel.cloudDisplayNumber,
-      verifiedName: channel.cloudVerifiedName,
-      connectedAt: channel.cloudConnectedAt,
-      lastError: channel.cloudStatus === 'FAILED' ? channel.cloudLastError : null,
+      status: cloudStatus as 'CONNECTED' | 'FAILED' | 'DISCONNECTED',
+      /** Every connected number; the first is the default for broadcasts and new chats. */
+      numbers: connectedNumbers,
+      // The default number's details, for callers that show a single number.
+      phoneNumberId: primary?.phoneNumberId ?? null,
+      businessAccountId: primary?.businessAccountId ?? null,
+      displayNumber: primary?.displayNumber ?? null,
+      verifiedName: primary?.verifiedName ?? null,
+      connectedAt: primary?.connectedAt ?? null,
+      lastError: cloudStatus === 'FAILED' ? channel.cloudLastError : null,
       webhookPath: '/api/webhooks/whatsapp',
       webhookReady: Boolean(env.whatsapp.webhookVerifyToken && env.whatsapp.appSecret),
+      oauthAvailable: oauthAvailable(),
+      connectMethod: primary?.connectMethod ?? null,
+      accessExpiresAt: primary?.accessExpiresAt ?? null,
+      qualityRating: primary?.qualityRating ?? null,
+      webhookSubscribed: primary?.webhookSubscribed ?? false,
     },
     web: {
       enabled: env.whatsapp.webEnabled,
@@ -99,116 +112,39 @@ export async function getStatus(organizationId: string) {
 
 // ----------------------------- Cloud API -------------------------------------
 
+/** Adds (or refreshes) a Cloud API number. */
 export async function connectCloud(
-  auth: AuthContext,
+  auth: Pick<AuthContext, 'organizationId' | 'userId'>,
   input: { phoneNumberId: string; businessAccountId: string; accessToken: string },
   req: Request,
+  options: { method: numbers.ConnectMethod; tokenExpiresAt?: Date | null } = { method: 'MANUAL' },
 ) {
   assertConfigured();
   await getOrCreateChannel(auth.organizationId);
-
-  // Verify before storing anything: a token Meta rejects is never saved.
-  let info: cloud.PhoneNumberInfo;
-  try {
-    info = await cloud.verifyPhoneNumber(input.phoneNumberId, input.accessToken);
-  } catch (error) {
-    await prisma.whatsAppChannel.update({
-      where: { organizationId: auth.organizationId },
-      data: {
-        cloudStatus: 'FAILED',
-        cloudLastError: error instanceof WhatsAppError ? error.whatsappCode : WhatsAppErrorCode.CLOUD_UNREACHABLE,
-      },
-    });
-    throw error;
-  }
-
-  const token = encryptText(input.accessToken);
-  const existing = await prisma.whatsAppChannel.findUniqueOrThrow({ where: { organizationId: auth.organizationId } });
-
-  await prisma.whatsAppChannel.update({
-    where: { organizationId: auth.organizationId },
-    data: {
-      cloudPhoneNumberId: input.phoneNumberId,
-      cloudBusinessAccountId: input.businessAccountId,
-      cloudTokenCiphertext: token.ciphertext,
-      cloudTokenIv: token.iv,
-      cloudTokenTag: token.tag,
-      cloudDisplayNumber: info.display_phone_number ?? null,
-      cloudVerifiedName: info.verified_name ?? null,
-      cloudStatus: 'CONNECTED',
-      cloudLastError: null,
-      cloudConnectedAt: new Date(),
-      activeProvider: existing.activeProvider ?? 'CLOUD_API',
-    },
-  });
-
-  await recordAudit({
-    organizationId: auth.organizationId,
-    userId: auth.userId,
-    action: AUDIT_ACTIONS.WHATSAPP_CONNECTED,
-    entityType: 'WhatsAppChannel',
-    entityLabel: 'Cloud API',
-    newValue: { provider: 'CLOUD_API', number: info.display_phone_number ?? null },
-    req,
-  });
-
+  await numbers.connectNumber(auth, input, req, options);
   return getStatus(auth.organizationId);
 }
 
+/** Disconnects every Cloud API number. */
 export async function disconnectCloud(auth: AuthContext, req: Request) {
-  const channel = await getOrCreateChannel(auth.organizationId);
-  await prisma.whatsAppChannel.update({
-    where: { organizationId: auth.organizationId },
-    data: {
-      cloudTokenCiphertext: null,
-      cloudTokenIv: null,
-      cloudTokenTag: null,
-      cloudStatus: 'DISCONNECTED',
-      cloudDisplayNumber: null,
-      cloudVerifiedName: null,
-      cloudLastError: null,
-      cloudConnectedAt: null,
-      activeProvider:
-        channel.activeProvider === 'CLOUD_API' ? (channel.webStatus === 'CONNECTED' ? 'WEB_QR' : null) : channel.activeProvider,
-    },
-  });
-  await recordAudit({
-    organizationId: auth.organizationId,
-    userId: auth.userId,
-    action: AUDIT_ACTIONS.WHATSAPP_DISCONNECTED,
-    entityType: 'WhatsAppChannel',
-    entityLabel: 'Cloud API',
-    req,
-  });
+  await getOrCreateChannel(auth.organizationId);
+  await numbers.disconnectAllNumbers(auth, req);
   return getStatus(auth.organizationId);
 }
 
-export async function cloudCredentials(organizationId: string) {
-  const channel = await prisma.whatsAppChannel.findUnique({ where: { organizationId } });
-  if (
-    !channel ||
-    channel.cloudStatus !== 'CONNECTED' ||
-    !channel.cloudPhoneNumberId ||
-    !channel.cloudTokenCiphertext ||
-    !channel.cloudTokenIv ||
-    !channel.cloudTokenTag
-  ) {
-    throw new WhatsAppError(WhatsAppErrorCode.NOT_CONNECTED);
-  }
-  assertConfigured();
-  return {
-    phoneNumberId: channel.cloudPhoneNumberId,
-    businessAccountId: channel.cloudBusinessAccountId,
-    token: decryptText({
-      ciphertext: Buffer.from(channel.cloudTokenCiphertext),
-      iv: Buffer.from(channel.cloudTokenIv),
-      tag: Buffer.from(channel.cloudTokenTag),
-    }),
-  };
+export async function disconnectCloudNumber(auth: AuthContext, numberId: string, req: Request) {
+  await numbers.disconnectNumber(auth, numberId, req);
+  return getStatus(auth.organizationId);
 }
 
-export async function listTemplates(organizationId: string) {
-  const credentials = await cloudCredentials(organizationId);
+/** Credentials for a send — a specific number, or the organization's default. */
+export function cloudCredentials(organizationId: string, numberId?: string | null) {
+  return numbers.credentialsFor(organizationId, numberId);
+}
+
+/** Approved templates of the chosen (or default) number's business account. */
+export async function listTemplates(organizationId: string, numberId?: string | null) {
+  const credentials = await cloudCredentials(organizationId, numberId);
   if (!credentials.businessAccountId) return [];
   return cloud.listApprovedTemplates(credentials.businessAccountId, credentials.token);
 }
@@ -242,7 +178,7 @@ export async function disconnectWeb(auth: AuthContext, req: Request) {
   if (channel.activeProvider === 'WEB_QR') {
     await prisma.whatsAppChannel.update({
       where: { organizationId: auth.organizationId },
-      data: { activeProvider: channel.cloudStatus === 'CONNECTED' ? 'CLOUD_API' : null },
+      data: { activeProvider: (await numbers.activeNumbers(auth.organizationId)).length ? 'CLOUD_API' : null },
     });
   }
   await recordAudit({

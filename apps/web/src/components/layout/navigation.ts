@@ -5,6 +5,7 @@ import {
   FileText,
   HeartHandshake,
   LayoutDashboard,
+  MessageCircle,
   Settings,
   ShoppingCart,
   Wallet,
@@ -17,7 +18,7 @@ export interface NavItem {
   to: string;
   icon: LucideIcon;
   permission: Permission[];
-  badge?: 'approvals';
+  badge?: 'approvals' | 'whatsapp';
   end?: boolean;
 }
 
@@ -27,6 +28,7 @@ export const NAV_ITEMS: NavItem[] = [
   { labelKey: 'nav.finance', to: '/finance', icon: Wallet, permission: ['finance.view'] },
   { labelKey: 'nav.donations', to: '/donations', icon: HeartHandshake, permission: ['donation.view'] },
   { labelKey: 'nav.donors', to: '/donors', icon: Contact, permission: ['donor.view'] },
+  { labelKey: 'whatsappInbox.navLabel', to: '/whatsapp', icon: MessageCircle, permission: ['whatsapp.inbox'], badge: 'whatsapp' },
   { labelKey: 'nav.purchases', to: '/purchases', icon: ShoppingCart, permission: ['purchase.view'] },
   { labelKey: 'nav.banking', to: '/banking', icon: Banknote, permission: ['banking.view'] },
   { labelKey: 'nav.reports', to: '/reports', icon: FileText, permission: ['report.view'] },

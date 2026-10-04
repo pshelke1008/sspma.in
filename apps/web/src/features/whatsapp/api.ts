@@ -9,6 +9,8 @@ export interface WhatsAppStatus {
   activeProvider: WhatsAppProviderKey | null;
   cloud: {
     status: WhatsAppConnectionStatusKey;
+    /** Every connected Cloud API number; the first is the default sender. */
+    numbers: WhatsAppNumber[];
     phoneNumberId: string | null;
     businessAccountId: string | null;
     displayNumber: string | null;
@@ -17,6 +19,12 @@ export interface WhatsAppStatus {
     lastError: string | null;
     webhookPath: string;
     webhookReady: boolean;
+    /** Whether "Connect with Facebook" is set up on the server. */
+    oauthAvailable: boolean;
+    connectMethod: 'MANUAL' | 'OAUTH' | null;
+    accessExpiresAt: string | null;
+    qualityRating: string | null;
+    webhookSubscribed: boolean;
   };
   web: {
     enabled: boolean;
@@ -162,3 +170,34 @@ export const BROADCAST_TONES: Record<BroadcastStatus, Tone> = {
   COMPLETED: 'success',
   CANCELLED: 'warning',
 };
+
+/** A connected WhatsApp Business number (Cloud API). Tokens never leave the server. */
+export interface WhatsAppNumber {
+  id: string;
+  phoneNumberId: string;
+  businessAccountId: string;
+  displayNumber: string | null;
+  verifiedName: string | null;
+  qualityRating: string | null;
+  connectMethod: 'MANUAL' | 'OAUTH';
+  accessExpiresAt: string | null;
+  webhookSubscribed: boolean;
+  connectedAt: string;
+}
+
+/** A Facebook sign-in waiting for the admin to choose a number. */
+export interface PendingConnection {
+  id: string;
+  expiresAt: string;
+  businessAccounts: {
+    id: string;
+    name: string | null;
+    phoneNumbers: { id: string; displayNumber: string | null; verifiedName: string | null; qualityRating: string | null }[];
+  }[];
+}
+
+/** Days until the Cloud API token stops working; null when it does not expire. */
+export function tokenDaysLeft(expiresAt: string | null): number | null {
+  if (!expiresAt) return null;
+  return Math.floor((new Date(expiresAt).getTime() - Date.now()) / 86_400_000);
+}

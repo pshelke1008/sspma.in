@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
+import type { ColumnDef } from '@tanstack/react-table';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -12,7 +13,10 @@ import { useAuth } from '@/lib/auth/AuthProvider';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { SectionCard } from '@/components/common/SectionCard';
 import { StatCard } from '@/components/common/StatCard';
-import { CardGridSkeleton, EmptyState, ErrorState, TableSkeleton } from '@/components/common/states';
+import { CardGridSkeleton, EmptyState, ErrorState } from '@/components/common/states';
+import { DataTable } from '@/components/common/DataTable';
+import { ExportMenu } from '@/components/common/ExportMenu';
+import type { ExportColumn } from '@/lib/export';
 import { FormField, DateInput, MoneyInput } from '@/components/common/forms';
 import { Button } from '@/components/ui/button';
 import { Input, Textarea } from '@/components/ui/input';
@@ -20,7 +24,7 @@ import { SimpleSelect } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { formatCurrency, formatDate } from '@/lib/utils/format';
+import { formatCurrency, formatDate, todayLocal } from '@/lib/utils/format';
 import { useTranslation } from 'react-i18next';
 import { errorMessage } from '@/i18n/errors';
 
@@ -72,10 +76,52 @@ export default function BankingPage() {
       ),
   });
 
-  const { data: transfers, isLoading: transfersLoading } = useQuery({
+  const {
+    data: transfers,
+    isLoading: transfersLoading,
+    error: transfersError,
+    refetch: refetchTransfers,
+  } = useQuery({
     queryKey: queryKeys.bankTransfers,
     queryFn: () => api.get<{ data: TransferRow[] }>('/banking/transfers'),
   });
+
+  const transferColumns: ColumnDef<TransferRow>[] = [
+    {
+      id: 'transferNumber',
+      header: t('banking.transferNumber'),
+      cell: ({ row }) => <span className="font-medium text-ink">{row.original.transferNumber}</span>,
+    },
+    {
+      id: 'date',
+      header: t('common.date'),
+      cell: ({ row }) => <span className="whitespace-nowrap text-ink-muted">{formatDate(row.original.date)}</span>,
+    },
+    { id: 'from', header: t('common.from'), cell: ({ row }) => row.original.fromAccount.name },
+    { id: 'to', header: t('common.to'), cell: ({ row }) => row.original.toAccount.name },
+    {
+      id: 'reference',
+      header: t('common.reference'),
+      cell: ({ row }) => <span className="text-ink-muted">{row.original.referenceNumber ?? '—'}</span>,
+    },
+    {
+      id: 'amount',
+      header: t('common.amount'),
+      meta: { align: 'right' },
+      cell: ({ row }) => <span className="font-semibold text-ink">{formatCurrency(row.original.amount)}</span>,
+    },
+  ];
+
+  const transferExportColumns: ExportColumn<TransferRow>[] = [
+    { header: t('banking.transferNumber'), value: (row) => row.transferNumber },
+    { header: t('common.date'), type: 'date', value: (row) => row.date },
+    { header: t('banking.fromAccount'), value: (row) => row.fromAccount.name },
+    { header: t('banking.toAccount'), value: (row) => row.toAccount.name },
+    { header: t('common.reference'), value: (row) => row.referenceNumber },
+    { header: t('common.notes'), value: (row) => row.notes },
+    { header: t('dataExport.cols.createdBy'), value: (row) => row.createdBy?.name },
+    { header: t('common.amount'), type: 'currency', value: (row) => row.amount },
+  ];
 
   if (error) return <ErrorState message={errorMessage(t, error)} onRetry={() => void refetch()} />;
 
@@ -194,54 +240,57 @@ export default function BankingPage() {
 
         <TabsContent value="transfers">
           <SectionCard noPadding>
-            {transfersLoading ? (
-              <TableSkeleton columns={5} />
-            ) : !transfers?.data.length ? (
-              <EmptyState
-                icon={ArrowLeftRight}
-                title={t('banking.noTransfers')}
-                description={t('banking.noTransfersText')}
-                action={
-                  can('banking.manage') && (
-                    <Button size="sm" onClick={() => setTransferOpen(true)}>
-                      {t('banking.transferMoney')}
-                    </Button>
-                  )
-                }
-              />
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[680px] border-collapse">
-                  <thead>
-                    <tr className="border-b border-line bg-canvas/60">
-                      {[t('banking.transferNumber'), t('common.date'), t('common.from'), t('common.to'), t('common.reference'), t('common.amount')].map((heading, index) => (
-                        <th
-                          key={heading}
-                          scope="col"
-                          className={`px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-ink-muted ${index === 5 ? 'text-right' : 'text-left'}`}
-                        >
-                          {heading}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-line">
-                    {transfers.data.map((transfer) => (
-                      <tr key={transfer.id} className="transition-colors hover:bg-canvas/60">
-                        <td className="px-3 py-2.5 text-[12.5px] font-medium text-ink">{transfer.transferNumber}</td>
-                        <td className="whitespace-nowrap px-3 py-2.5 text-[12.5px] text-ink-muted">{formatDate(transfer.date)}</td>
-                        <td className="px-3 py-2.5 text-[12.5px] text-ink">{transfer.fromAccount.name}</td>
-                        <td className="px-3 py-2.5 text-[12.5px] text-ink">{transfer.toAccount.name}</td>
-                        <td className="px-3 py-2.5 text-[12.5px] text-ink-muted">{transfer.referenceNumber ?? '—'}</td>
-                        <td className="px-3 py-2.5 text-right text-[12.5px] font-semibold text-ink tnum">
-                          {formatCurrency(transfer.amount)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            {Boolean(transfers?.data.length) && (
+              <div className="flex items-center justify-end border-b border-line px-3 py-2">
+                <ExportMenu
+                  size="sm"
+                  fileBase="bank-transfers"
+                  title={t('banking.transfers')}
+                  columns={transferExportColumns}
+                  rows={transfers?.data ?? []}
+                />
               </div>
             )}
+            <DataTable
+              columns={transferColumns}
+              data={transfers?.data ?? []}
+              isLoading={transfersLoading}
+              error={transfersError as Error | null}
+              onRetry={() => void refetchTransfers()}
+              getRowId={(row) => row.id}
+              showColumnToggle={false}
+              tableClassName="min-w-[680px]"
+              emptyState={
+                <EmptyState
+                  icon={ArrowLeftRight}
+                  title={t('banking.noTransfers')}
+                  description={t('banking.noTransfersText')}
+                  action={
+                    can('banking.manage') && (
+                      <Button size="sm" onClick={() => setTransferOpen(true)}>
+                        {t('banking.transferMoney')}
+                      </Button>
+                    )
+                  }
+                />
+              }
+              mobileCard={(row) => (
+                <div className="flex items-start gap-3 px-4 py-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[13px] font-medium text-ink">
+                      {row.fromAccount.name} → {row.toAccount.name}
+                    </p>
+                    <p className="mt-0.5 truncate text-[11.5px] text-ink-muted">
+                      {row.transferNumber} · {formatDate(row.date)}
+                    </p>
+                    {row.referenceNumber && (
+                      <p className="mt-0.5 truncate text-[11.5px] text-ink-muted">{row.referenceNumber}</p>
+                    )}
+                  </div>
+                  <span className="shrink-0 text-[13px] font-semibold text-ink tnum">{formatCurrency(row.amount)}</span>
+                </div>
+              )}
+            />
           </SectionCard>
         </TabsContent>
       </Tabs>
@@ -288,7 +337,7 @@ function TransferDialog({
     formState: { errors, isSubmitting },
   } = useForm<TransferValues>({
     resolver: zodResolver(transferSchema),
-    defaultValues: { date: new Date().toISOString().slice(0, 10), fromAccountId: '', toAccountId: '', amount: 0 },
+    defaultValues: { date: todayLocal(), fromAccountId: '', toAccountId: '', amount: 0 },
   });
 
   const fromAccount = accounts.find((account) => account.id === watch('fromAccountId'));

@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { CheckCircle2, ClipboardCheck, Eye, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
-import { ApiError, api, buildQuery } from '@/lib/api/client';
+import { api, buildQuery } from '@/lib/api/client';
 import { invalidateFinancialData, queryKeys } from '@/lib/api/queryClient';
 import { useMasters } from '@/lib/api/hooks';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -12,6 +12,10 @@ import { FilterBar, FilterField } from '@/components/common/FilterBar';
 import { StatusBadge } from '@/components/common/StatusBadge';
 import { EmptyState, ErrorState } from '@/components/common/states';
 import { ConfirmationDialog } from '@/components/common/ConfirmationDialog';
+import { TablePagination } from '@/components/common/DataTable';
+import { ExportMenu } from '@/components/common/ExportMenu';
+import { fetchAllPages, type ExportColumn } from '@/lib/export';
+import { useLabels } from '@/i18n/useLabels';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton, Progress } from '@/components/ui/misc';
@@ -59,12 +63,15 @@ const TABS = [
 
 export default function ApprovalsPage() {
   const { t } = useTranslation();
+  const labels = useLabels();
   const [searchParams, setSearchParams] = useSearchParams();
   const { data: masters } = useMasters();
 
   const tab = searchParams.get('tab') ?? 'pending';
   const search = searchParams.get('search') ?? '';
   const departmentId = searchParams.get('department') ?? '';
+  const page = Math.max(1, Number(searchParams.get('page') ?? '1') || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(searchParams.get('pageSize') ?? '20') || 20));
 
   const [target, setTarget] = useState<{ row: ApprovalRow; kind: 'approve' | 'reject' } | null>(null);
   const [reason, setReason] = useState('');
@@ -73,19 +80,48 @@ export default function ApprovalsPage() {
     const next = new URLSearchParams(searchParams);
     if (value) next.set(key, value);
     else next.delete(key);
+    // Any change other than paging starts again from the first page.
+    if (key !== 'page') next.delete('page');
     setSearchParams(next, { replace: true });
   }
 
-  const params = useMemo(
-    () => ({ tab, search: search || undefined, departmentId: departmentId || undefined, pageSize: 50 }),
+  const filters = useMemo(
+    () => ({ tab, search: search || undefined, departmentId: departmentId || undefined }),
     [tab, search, departmentId],
   );
+  const params = useMemo(() => ({ ...filters, page, pageSize }), [filters, page, pageSize]);
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: queryKeys.approvals(params),
     queryFn: () => api.get<ApprovalsResponse>('/approvals' + buildQuery(params)),
     placeholderData: (previous) => previous,
   });
+
+  // Deciding the last request on the last page leaves that page empty; step back.
+  const lastPage = data?.meta.totalPages;
+  useEffect(() => {
+    if (lastPage && page > lastPage) setParam('page', lastPage > 1 ? String(lastPage) : '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastPage, page]);
+
+  const exportColumns: ExportColumn<ApprovalRow>[] = [
+    { header: t('expenses.number'), value: (row) => row.expenseNumber },
+    { header: t('expenses.expense'), value: (row) => row.title },
+    { header: t('common.date'), type: 'date', value: (row) => row.date },
+    { header: t('dataExport.cols.submittedOn'), type: 'date', value: (row) => row.submittedAt },
+    { header: t('approvals.requestedBy'), value: (row) => (row.onBehalfOf ?? row.createdBy).name },
+    { header: t('dataExport.cols.createdBy'), value: (row) => row.createdBy.name },
+    { header: t('common.department'), value: (row) => row.department.name },
+    { header: t('common.category'), value: (row) => row.category.name },
+    { header: t('common.fund'), value: (row) => row.fund.name },
+    { header: t('common.supplier'), value: (row) => row.supplier?.name },
+    { header: t('common.amount'), type: 'currency', value: (row) => row.total },
+    { header: t('common.status'), value: (row) => labels.expenseStatus[row.status] ?? row.status },
+    { header: t('dataExport.cols.decidedBy'), value: (row) => row.approvedBy?.name },
+    { header: t('dataExport.cols.decidedOn'), type: 'date', value: (row) => row.approvedAt },
+    { header: t('dataExport.cols.rejectionReason'), value: (row) => row.rejectionReason },
+  ];
+  const tabLabel = t(TABS.find((item) => item.value === tab)?.labelKey ?? 'approvals.tabAll');
 
   const decision = useMutation({
     mutationFn: ({ row, kind }: { row: ApprovalRow; kind: 'approve' | 'reject' }) =>
@@ -110,6 +146,19 @@ export default function ApprovalsPage() {
       <PageHeader
         title={t('approvals.title')}
         subtitle={t('approvals.subtitle')}
+        actions={
+          <ExportMenu
+            fileBase={`approvals-${tab}`}
+            title={t('approvals.title')}
+            subtitle={tabLabel}
+            columns={exportColumns}
+            fetchRows={() =>
+              fetchAllPages((pageNumber, size) =>
+                api.get<ApprovalsResponse>('/approvals' + buildQuery({ ...filters, page: pageNumber, pageSize: size })),
+              )
+            }
+          />
+        }
       />
 
       <SectionCard noPadding>
@@ -178,6 +227,17 @@ export default function ApprovalsPage() {
               </li>
             ))}
           </ul>
+        )}
+
+        {data && data.meta.total > 0 && (
+          <TablePagination
+            page={data.meta.page}
+            pageSize={data.meta.pageSize}
+            total={data.meta.total}
+            totalPages={data.meta.totalPages}
+            onPageChange={(value) => setParam('page', value > 1 ? String(value) : '')}
+            onPageSizeChange={(size) => setParam('pageSize', size === 20 ? '' : String(size))}
+          />
         )}
       </SectionCard>
 

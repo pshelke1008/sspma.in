@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
+import type { ColumnDef } from '@tanstack/react-table';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -11,7 +12,8 @@ import { useAuth } from '@/lib/auth/AuthProvider';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { SectionCard } from '@/components/common/SectionCard';
 import { SearchInput } from '@/components/common/FilterBar';
-import { EmptyState, TableSkeleton } from '@/components/common/states';
+import { EmptyState } from '@/components/common/states';
+import { DataTable } from '@/components/common/DataTable';
 import { FormField, MoneyInput } from '@/components/common/forms';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -50,10 +52,46 @@ export default function ChartOfAccountsPage() {
   const [typeFilter, setTypeFilter] = useState('all');
   const [open, setOpen] = useState(false);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: queryKeys.settings,
     queryFn: () => api.get<{ accounts: Account[] }>('/settings'),
   });
+
+  const columns = useMemo<ColumnDef<Account>[]>(
+    () => [
+      {
+        id: 'code',
+        header: t('common.code'),
+        cell: ({ row }) => <span className="font-medium text-ink tnum">{row.original.code}</span>,
+      },
+      {
+        id: 'name',
+        header: t('common.account'),
+        cell: ({ row }) => (
+          <>
+            <span className="text-ink">{row.original.name}</span>
+            {row.original.isBankAccount && (
+              <Badge tone="neutral" className="ml-2">
+                {t('coa.bank')}
+              </Badge>
+            )}
+          </>
+        ),
+      },
+      {
+        id: 'type',
+        header: t('common.type'),
+        cell: ({ row }) => <Badge tone={TYPE_TONES[row.original.type]}>{labels.accountType[row.original.type]}</Badge>,
+      },
+      {
+        id: 'openingBalance',
+        header: t('banking.openingBalance'),
+        meta: { align: 'right' },
+        cell: ({ row }) => (row.original.openingBalance > 0 ? formatCurrency(row.original.openingBalance) : '—'),
+      },
+    ],
+    [t, labels],
+  );
 
   const filtered = useMemo(() => {
     const accounts = data?.accounts ?? [];
@@ -100,50 +138,33 @@ export default function ChartOfAccountsPage() {
           />
         </div>
 
-        {isLoading ? (
-          <TableSkeleton columns={4} />
-        ) : filtered.length === 0 ? (
-          <EmptyState icon={ListTree} title={t('coa.noMatch')} description={t('coa.noMatchText')} />
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px] border-collapse">
-              <thead>
-                <tr className="border-b border-line bg-canvas/60">
-                  {[t('common.code'), t('common.account'), t('common.type'), t('banking.openingBalance')].map((heading, index) => (
-                    <th
-                      key={heading}
-                      scope="col"
-                      className={`px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-ink-muted ${index === 3 ? 'text-right' : 'text-left'}`}
-                    >
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-line">
-                {filtered.map((account) => (
-                  <tr key={account.id} className="transition-colors hover:bg-canvas/60">
-                    <td className="px-4 py-2.5 text-[12.5px] font-medium text-ink tnum">{account.code}</td>
-                    <td className="px-4 py-2.5">
-                      <span className="text-[12.5px] text-ink">{account.name}</span>
-                      {account.isBankAccount && (
-                        <Badge tone="neutral" className="ml-2">
-                          {t('coa.bank')}
-                        </Badge>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <Badge tone={TYPE_TONES[account.type]}>{labels.accountType[account.type]}</Badge>
-                    </td>
-                    <td className="px-4 py-2.5 text-right text-[12.5px] text-ink tnum">
-                      {account.openingBalance > 0 ? formatCurrency(account.openingBalance) : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <DataTable
+          columns={columns}
+          data={filtered}
+          isLoading={isLoading}
+          error={error as Error | null}
+          onRetry={() => void refetch()}
+          getRowId={(account) => account.id}
+          showColumnToggle={false}
+          tableClassName="min-w-[560px]"
+          emptyState={<EmptyState icon={ListTree} title={t('coa.noMatch')} description={t('coa.noMatchText')} />}
+          mobileCard={(account) => (
+            <div className="flex items-start gap-3 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[13px] font-medium text-ink">
+                  <span className="tnum">{account.code}</span> · {account.name}
+                </p>
+                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                  <Badge tone={TYPE_TONES[account.type]}>{labels.accountType[account.type]}</Badge>
+                  {account.isBankAccount && <Badge tone="neutral">{t('coa.bank')}</Badge>}
+                </div>
+              </div>
+              <span className="shrink-0 text-[12.5px] text-ink tnum">
+                {account.openingBalance > 0 ? formatCurrency(account.openingBalance) : '—'}
+              </span>
+            </div>
+          )}
+        />
       </SectionCard>
 
       <AccountDialog open={open} onOpenChange={setOpen} />

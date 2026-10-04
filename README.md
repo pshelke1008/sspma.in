@@ -59,7 +59,7 @@ from an Ashram Management session.
 | `npm run db:reset` | Drop, re-migrate and re-seed |
 | `npm run db:studio` | Prisma Studio |
 | `npm test` | Unit tests (state machine, separation of duties, money, dates, WhatsApp) |
-| `npm run test:e2e` | API workflow suite — reseeds and runs its own API |
+| `npm run test:e2e` | API workflow suite — reseeds a separate `_test` database and runs its own API |
 | `npm run qa` | Every route at 7 viewports in a real browser, plus a Marathi pass |
 | `npm run qa:workflow` | Clicks the whole workflow through the interface |
 | `npm run typecheck` | TypeScript across both apps |
@@ -224,12 +224,13 @@ word; screen text lives in `apps/web/src/i18n/locales`.
 
 | Suite | Coverage |
 | --- | --- |
-| `npm test` | 42 unit tests: state machine, transition permissions, separation of duties, edit/delete guards, line arithmetic, financial-year maths, phone normalisation, secret encryption, WhatsApp error codes |
-| `npm run test:e2e` | 157 checks: auth, RBAC, tenant isolation, the whole expense lifecycle, admin on-behalf entry and self-approval, revisions, all 14 reports, PDF/Excel/CSV exports in English and Marathi, audit log, notifications, banking, donors, WhatsApp consent and permission guards, settings |
+| `npm test` | 73 unit tests: donor CSV import parsing and duplicate detection, state machine, transition permissions, separation of duties, edit/delete guards, line arithmetic, financial-year maths, phone normalisation, secret encryption, WhatsApp error codes |
+| `npm run test:e2e` | 201 checks: auth, RBAC, tenant isolation, the whole expense lifecycle, admin on-behalf entry and self-approval, revisions, all 14 reports, PDF/Excel/CSV exports in English and Marathi, audit log, notifications, banking, donors, WhatsApp consent and permission guards, settings |
 | `npm run qa` | Every route at 1440/1280/1024/768/430/390/375, and again in Marathi at desktop and phone width — console errors, 5xx responses, horizontal overflow, forbidden wording, WCAG 2.1 AA (axe) |
 | `npm run qa:workflow` | 55 checks driving the real interface: the four-step wizard, approval, payment, all detail tabs, real file downloads, filter persistence, empty states, permission gating, admin Submit & Approve on behalf of a user, donors, broadcasts, WhatsApp settings, language switching |
 
-`test:e2e` reseeds the database and starts its own API process, so it is
+`test:e2e` drops and reseeds a separate `_test` database (`TEST_DATABASE_URL`, or your
+`DATABASE_URL` with `_test` appended — it refuses any other name) and starts its own API process, so it is
 repeatable. Point `E2E_API_URL` at a deployment to test it instead, and the
 database is left alone.
 

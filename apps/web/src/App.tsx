@@ -17,6 +17,7 @@ const DonationsPage = lazy(() => import('@/features/donations/DonationsPage'));
 const DonorsPage = lazy(() => import('@/features/donors/DonorsPage'));
 const DonorProfilePage = lazy(() => import('@/features/donors/DonorProfilePage'));
 const WhatsAppSettingsPage = lazy(() => import('@/features/whatsapp/WhatsAppSettingsPage'));
+const WhatsAppInboxPage = lazy(() => import('@/features/whatsapp/inbox/WhatsAppInboxPage'));
 const PurchasesPage = lazy(() => import('@/features/purchases/PurchasesPage'));
 const BankingPage = lazy(() => import('@/features/banking/BankingPage'));
 const SettingsPage = lazy(() => import('@/features/settings/SettingsPage'));
@@ -74,6 +75,10 @@ export default function App() {
           <Route element={<RequirePermission permission="donor.view" />}>
             <Route path="/donors" element={<DonorsPage />} />
             <Route path="/donors/:id" element={<DonorProfilePage />} />
+          </Route>
+
+          <Route element={<RequirePermission permission="whatsapp.inbox" />}>
+            <Route path="/whatsapp" element={<WhatsAppInboxPage />} />
           </Route>
 
           <Route element={<RequirePermission permission="purchase.view" />}>

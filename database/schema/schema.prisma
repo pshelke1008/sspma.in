@@ -205,6 +205,8 @@ model Organization {
   sessions        Session[]
   numberSequences NumberSequence[]
   whatsAppChannel    WhatsAppChannel?
+  whatsAppPendingConnections WhatsAppPendingConnection[]
+  whatsAppNumbers            WhatsAppNumber[]
   whatsAppMessages   WhatsAppMessage[]
   whatsAppBroadcasts WhatsAppBroadcast[]
 
@@ -454,9 +456,13 @@ model Donor {
   whatsappNumber    String?
   alternatePhone    String?
   panNumber         String?
+  /// 12 digits. Never returned by the API — only maskAadhaar()'s last four.
+  aadhaarNumber     String?
   addressLine1      String?
   addressLine2      String?
-  city              String?
+  /// Gaon — the village or locality within the district.
+  village           String?
+  district          String?
   state             String?
   postalCode        String?
   country           String        @default("India")
@@ -481,6 +487,7 @@ model Donor {
   @@index([organizationId])
   @@index([organizationId, name])
   @@index([organizationId, whatsappOptIn])
+  @@index([organizationId, state, district, village])
 }
 
 model NumberSequence {
@@ -965,16 +972,8 @@ model WhatsAppChannel {
   organizationId String            @unique
   activeProvider WhatsAppProvider?
 
-  cloudPhoneNumberId     String?
-  cloudBusinessAccountId String?
-  cloudTokenCiphertext   Bytes?
-  cloudTokenIv           Bytes?
-  cloudTokenTag          Bytes?
-  cloudDisplayNumber     String?
-  cloudVerifiedName      String?
-  cloudStatus            WhatsAppConnectionStatus @default(DISCONNECTED)
+  /// Why the last Cloud API connect attempt failed; the numbers themselves live in WhatsAppNumber.
   cloudLastError         String?
-  cloudConnectedAt       DateTime?
 
   webStatus            WhatsAppConnectionStatus @default(DISCONNECTED)
   webPhoneNumber       String?
@@ -995,8 +994,59 @@ model WhatsAppChannel {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  @@index([cloudPhoneNumberId])
   @@index([webStatus])
+}
+
+/// A WhatsApp Business number connected through the Cloud API. An
+/// organization can connect several (one per ashram office, say); each keeps
+/// its own encrypted token because they may come from different Meta accounts.
+model WhatsAppNumber {
+  id                String    @id @default(cuid())
+  organizationId    String
+  /// Meta's phone number ID — unique across tenants, so webhooks route unambiguously.
+  phoneNumberId     String    @unique
+  businessAccountId String
+  displayNumber     String?
+  verifiedName      String?
+  qualityRating     String?
+  tokenCiphertext   Bytes
+  tokenIv           Bytes
+  tokenTag          Bytes
+  tokenExpiresAt    DateTime?
+  /// MANUAL (token pasted) or OAUTH (Connect with Facebook).
+  connectMethod     String
+  webhookSubscribed Boolean   @default(false)
+  isActive          Boolean   @default(true)
+  connectedById     String?
+  connectedAt       DateTime  @default(now())
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  messages     WhatsAppMessage[]
+
+  @@index([organizationId, isActive])
+}
+
+/// A "Connect with Facebook" sign-in waiting for the admin to pick which
+/// WhatsApp number to use. Holds the Meta token encrypted; lives 15 minutes.
+model WhatsAppPendingConnection {
+  id               String    @id @default(cuid())
+  organizationId   String
+  userId           String
+  tokenCiphertext  Bytes
+  tokenIv          Bytes
+  tokenTag         Bytes
+  tokenExpiresAt   DateTime?
+  /// [{ id, name, phoneNumbers: [{ id, displayNumber, verifiedName, qualityRating }] }]
+  businessAccounts Json
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([expiresAt])
 }
 
 model WhatsAppBroadcast {
@@ -1031,11 +1081,22 @@ model WhatsAppMessage {
   organizationId    String
   donorId           String?
   broadcastId       String?
+  /// The business number it went out on / came in to (Cloud API only).
+  whatsappNumberId  String?
   direction         WhatsAppDirection     @default(OUTBOUND)
   provider          WhatsAppProvider
   phone             String
   body              String?
   templateName      String?
+  /// The sender's WhatsApp profile name, for contacts who are not donors yet.
+  contactName       String?
+  /// image | document | audio | video | sticker — with the file kept in storage.
+  mediaType         String?
+  mediaStorageKey   String?
+  mediaMimeType     String?
+  mediaFileName     String?
+  /// When staff opened the conversation after this inbound message arrived.
+  seenAt            DateTime?
   status            WhatsAppMessageStatus @default(QUEUED)
   providerMessageId String?
   error             String?
@@ -1049,10 +1110,12 @@ model WhatsAppMessage {
   organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   donor        Donor?             @relation(fields: [donorId], references: [id], onDelete: SetNull)
   broadcast    WhatsAppBroadcast? @relation(fields: [broadcastId], references: [id], onDelete: SetNull)
+  number       WhatsAppNumber?    @relation(fields: [whatsappNumberId], references: [id], onDelete: SetNull)
   sentBy       User?              @relation(fields: [sentById], references: [id])
 
   @@index([organizationId, createdAt])
   @@index([organizationId, donorId])
   @@index([broadcastId, status])
   @@index([providerMessageId])
+  @@index([organizationId, phone, createdAt])
 }

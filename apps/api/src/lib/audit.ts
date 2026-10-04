@@ -22,6 +22,8 @@ export const AUDIT_ACTIONS = {
   DONOR_CREATED: 'donor.created',
   DONOR_UPDATED: 'donor.updated',
   DONOR_DEACTIVATED: 'donor.deactivated',
+  DONOR_DELETED: 'donor.deleted',
+  DONOR_IMPORTED: 'donor.imported',
   WHATSAPP_CONNECTED: 'whatsapp.connected',
   WHATSAPP_DISCONNECTED: 'whatsapp.disconnected',
   WHATSAPP_MESSAGE_SENT: 'whatsapp.message_sent',

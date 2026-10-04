@@ -149,3 +149,58 @@ export async function sendTemplate(
   });
   return result.messages?.[0]?.id ?? '';
 }
+
+// ----------------------------- Media ------------------------------------------
+
+export type MediaKind = 'image' | 'document' | 'audio' | 'video' | 'sticker';
+
+/** Uploads a file to Meta for this number and returns the media id to send. */
+export async function uploadMedia(phoneNumberId: string, token: string, file: { buffer: Buffer; mimeType: string; fileName: string }) {
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', file.mimeType);
+  form.append('file', new Blob([file.buffer], { type: file.mimeType }), file.fileName);
+  let response: Response;
+  try {
+    response = await fetch(`${env.whatsapp.graphUrl}/${env.whatsapp.graphVersion}/${phoneNumberId}/media`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch {
+    throw new WhatsAppError(WhatsAppErrorCode.CLOUD_UNREACHABLE);
+  }
+  const payload = (await response.json().catch(() => ({}))) as { id?: string } & GraphErrorBody;
+  if (!response.ok || payload.error || !payload.id) throw mapGraphError(response.status, payload);
+  return payload.id;
+}
+
+export async function sendMedia(
+  phoneNumberId: string,
+  token: string,
+  to: string,
+  media: { kind: 'image' | 'document'; mediaId: string; caption?: string | null; fileName?: string | null },
+): Promise<string> {
+  const object: Record<string, string> = { id: media.mediaId };
+  if (media.caption) object.caption = media.caption;
+  if (media.kind === 'document' && media.fileName) object.filename = media.fileName;
+  const result = await graph<SendResult>(`${phoneNumberId}/messages`, token, {
+    method: 'POST',
+    body: { messaging_product: 'whatsapp', recipient_type: 'individual', to, type: media.kind, [media.kind]: object },
+  });
+  return result.messages?.[0]?.id ?? '';
+}
+
+/**
+ * Downloads an inbound media file. Meta returns a short-lived URL that itself
+ * needs the bearer token; files are capped at 25 MB.
+ */
+export async function downloadMedia(mediaId: string, token: string): Promise<{ buffer: Buffer; mimeType: string }> {
+  const meta = await graph<{ url?: string; mime_type?: string; file_size?: number }>(mediaId, token);
+  if (!meta.url) throw new WhatsAppError(WhatsAppErrorCode.SEND_FAILED);
+  if ((meta.file_size ?? 0) > 25 * 1024 * 1024) throw new WhatsAppError(WhatsAppErrorCode.SEND_FAILED);
+  const response = await fetch(meta.url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(60_000) });
+  if (!response.ok) throw new WhatsAppError(WhatsAppErrorCode.CLOUD_UNREACHABLE);
+  return { buffer: Buffer.from(await response.arrayBuffer()), mimeType: meta.mime_type ?? response.headers.get('content-type') ?? 'application/octet-stream' };
+}

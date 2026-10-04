@@ -7,6 +7,8 @@ import { AUDIT_ACTIONS, recordAudit } from '../../lib/audit';
 import { validate } from '../../middleware/validate';
 import { getCurrentOrganization, getCurrentUser, requirePermission } from '../../middleware/auth';
 import { conflict, notFound } from '../../lib/errors';
+import { assertOwned } from '../../lib/ownership';
+import { publicDonor } from '../donors/donor.service';
 
 export const settingsRouter = Router();
 
@@ -175,6 +177,7 @@ settingsRouter.post(
   validate(accountSchema),
   asyncHandler(async (req, res) => {
     const auth = getCurrentUser(req);
+    await assertOwned(auth.organizationId, { account: req.body.parentId });
     const account = await prisma.account.create({
       data: { organizationId: auth.organizationId, ...req.body, parentId: req.body.parentId || null },
     });
@@ -244,7 +247,8 @@ settingsRouter.get(
         prisma.costCenter.findMany({ where: { organizationId } }),
         prisma.expenseCategory.findMany({ where: { organizationId } }),
         prisma.supplier.findMany({ where: { organizationId } }),
-        prisma.donor.findMany({ where: { organizationId } }),
+        // Aadhaar numbers leave the server masked, backups included.
+        prisma.donor.findMany({ where: { organizationId } }).then((rows) => rows.map(publicDonor)),
         prisma.account.findMany({ where: { organizationId } }),
         prisma.bankAccount.findMany({ where: { organizationId } }),
         prisma.expense.findMany({ where: { organizationId }, include: { items: true } }),

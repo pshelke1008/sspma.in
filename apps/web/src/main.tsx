@@ -10,6 +10,7 @@ import { AuthProvider } from './lib/auth/AuthProvider';
 import './index.css';
 import './i18n';
 import { SkipLink } from './components/layout/SkipLink';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
@@ -18,7 +19,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <AuthProvider>
           <TooltipPrimitive.Provider delayDuration={250}>
             <SkipLink />
-            <App />
+            <ErrorBoundary fullPage>
+              <App />
+            </ErrorBoundary>
             <Toaster
               position="top-right"
               richColors

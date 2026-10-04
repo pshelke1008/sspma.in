@@ -21,13 +21,31 @@ function int(key: string, fallback: number): number {
 
 const nodeEnv = process.env.NODE_ENV ?? 'development';
 
+const DEV_SESSION_SECRET = 'ashram-management-development-secret';
+
+/**
+ * Sessions are HMAC-signed with this secret, so a guessable one lets anyone
+ * forge a login. Development falls back to a fixed value; production refuses
+ * to start without a real secret of reasonable length.
+ */
+function sessionSecret(): string {
+  const value = process.env.SESSION_SECRET;
+  if (nodeEnv !== 'production') return value || DEV_SESSION_SECRET;
+  if (!value || value === DEV_SESSION_SECRET || /change-?me/i.test(value) || value.length < 32) {
+    throw new Error(
+      'SESSION_SECRET must be set to a random value of at least 32 characters in production (openssl rand -base64 48)',
+    );
+  }
+  return value;
+}
+
 export const env = {
   nodeEnv,
   isProduction: nodeEnv === 'production',
   isTest: nodeEnv === 'test',
   port: int('API_PORT', 4300),
   databaseUrl: required('DATABASE_URL'),
-  sessionSecret: required('SESSION_SECRET', 'ashram-management-development-secret'),
+  sessionSecret: sessionSecret(),
   sessionTtlHours: int('SESSION_TTL_HOURS', 12),
   webOrigin: (process.env.WEB_ORIGIN ?? 'http://localhost:5173')
     .split(',')
@@ -43,8 +61,23 @@ export const env = {
     graphUrl: process.env.WHATSAPP_GRAPH_URL ?? 'https://graph.facebook.com',
     graphVersion: process.env.WHATSAPP_GRAPH_VERSION ?? 'v21.0',
     webhookVerifyToken: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || undefined,
-    appSecret: process.env.WHATSAPP_APP_SECRET || undefined,
+    appSecret: process.env.WHATSAPP_APP_SECRET || process.env.META_APP_SECRET || undefined,
+    /** Meta app ID, for "Connect with Facebook". Without it only manual token entry is offered. */
+    appId: process.env.WHATSAPP_APP_ID || process.env.META_APP_ID || undefined,
+    /**
+     * When this server shares a Meta app with another product (e.g. CAThrives),
+     * the app-level webhook URL points there. With this on, each business
+     * account connected here is subscribed with its own callback URL
+     * (${API_PUBLIC_URL}/api/webhooks/whatsapp), so its messages come here.
+     */
+    webhookOverride: (process.env.WHATSAPP_WEBHOOK_OVERRIDE ?? 'false') === 'true',
   },
+  /**
+   * Where this API is reachable from the internet — Meta redirects the browser
+   * back to `${publicApiUrl}/api/whatsapp/oauth/callback`, and that exact URL
+   * must be listed under "Valid OAuth Redirect URIs" in the Meta app.
+   */
+  publicApiUrl: (process.env.API_PUBLIC_URL || `http://localhost:${int('API_PORT', 4300)}`).replace(/\/+$/, ''),
   storage: {
     driver: (process.env.STORAGE_DRIVER ?? 'local') as 'local' | 's3',
     localDir: path.resolve(

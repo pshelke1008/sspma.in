@@ -1,33 +1,27 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
+import { Link, useSearchParams } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import type { ColumnDef } from '@tanstack/react-table';
 import { HeartHandshake, Plus, Users, Wallet } from 'lucide-react';
-import { toast } from 'sonner';
 import { DONATION_MODES } from '@ashram/types';
-import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useLabels } from '@/i18n/useLabels';
-import { errorMessage } from '@/i18n/errors';
-import { ApiError, api, buildQuery } from '@/lib/api/client';
-import { invalidateFinancialData, queryClient, queryKeys } from '@/lib/api/queryClient';
+import { api, buildQuery } from '@/lib/api/client';
+import { queryKeys } from '@/lib/api/queryClient';
 import { useMasters } from '@/lib/api/hooks';
 import { useAuth } from '@/lib/auth/AuthProvider';
+import { fetchAllPages, type ExportColumn } from '@/lib/export';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { SectionCard } from '@/components/common/SectionCard';
 import { StatCard } from '@/components/common/StatCard';
 import { FilterBar, FilterField } from '@/components/common/FilterBar';
-import { CardGridSkeleton, EmptyState, ErrorState, TableSkeleton } from '@/components/common/states';
-import { FormField, DateInput, MoneyInput } from '@/components/common/forms';
-import { TablePagination } from '@/components/common/DataTable';
+import { CardGridSkeleton, EmptyState } from '@/components/common/states';
+import { DataTable } from '@/components/common/DataTable';
+import { ExportMenu } from '@/components/common/ExportMenu';
+import { DonationDialog } from './DonationDialog';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Input, Textarea } from '@/components/ui/input';
-import { Checkbox } from '@/components/ui/misc';
 import { SimpleSelect } from '@/components/ui/select';
-import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { DonutChart } from '@/components/charts';
 import { formatCurrency, formatDate } from '@/lib/utils/format';
 
@@ -47,6 +41,11 @@ interface DonationRow {
   donor: { id: string; name: string } | null;
 }
 
+interface DonationListResponse {
+  data: DonationRow[];
+  meta: { page: number; pageSize: number; total: number; totalPages: number; totalAmount: number };
+}
+
 export default function DonationsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { can } = useAuth();
@@ -64,6 +63,7 @@ export default function DonationsPage() {
   const search = searchParams.get('search') ?? '';
   const fundId = searchParams.get('fund') ?? '';
   const mode = searchParams.get('mode') ?? '';
+  const activeFilterCount = [fundId, mode].filter(Boolean).length;
 
   function setParam(key: string, value: string) {
     const next = new URLSearchParams(searchParams);
@@ -73,17 +73,17 @@ export default function DonationsPage() {
     setSearchParams(next, { replace: true });
   }
 
-  const params = useMemo(
-    () => ({ page, pageSize: 20, search: search || undefined, fundId: fundId || undefined, mode: mode || undefined }),
-    [page, search, fundId, mode],
+  const clearFilters = () => setSearchParams(new URLSearchParams(), { replace: true });
+
+  const filters = useMemo(
+    () => ({ search: search || undefined, fundId: fundId || undefined, mode: mode || undefined }),
+    [search, fundId, mode],
   );
+  const params = useMemo(() => ({ page, pageSize: 20, ...filters }), [page, filters]);
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: queryKeys.donations(params),
-    queryFn: () =>
-      api.get<{ data: DonationRow[]; meta: { page: number; pageSize: number; total: number; totalPages: number; totalAmount: number } }>(
-        '/donations' + buildQuery(params),
-      ),
+    queryFn: () => api.get<DonationListResponse>('/donations' + buildQuery(params)),
     placeholderData: (previous) => previous,
   });
 
@@ -95,7 +95,83 @@ export default function DonationsPage() {
       ),
   });
 
-  if (error) return <ErrorState message={errorMessage(t, error)} onRetry={() => void refetch()} />;
+  const columns = useMemo<ColumnDef<DonationRow>[]>(
+    () => [
+      {
+        id: 'receiptNumber',
+        header: t('donations.receiptNumber'),
+        enableHiding: false,
+        cell: ({ row }) => <span className="font-medium text-ink">{row.original.receiptNumber}</span>,
+      },
+      {
+        id: 'date',
+        header: t('common.date'),
+        cell: ({ row }) => <span className="whitespace-nowrap text-ink-muted">{formatDate(row.original.date)}</span>,
+      },
+      {
+        id: 'donor',
+        header: t('donations.donor'),
+        cell: ({ row }) => (
+          <div className="max-w-[260px]">
+            {row.original.donor ? (
+              <Link to={`/donors/${row.original.donor.id}`} className="font-medium text-brand-primary hover:underline">
+                {row.original.donorName}
+              </Link>
+            ) : (
+              <p className="font-medium text-ink">{row.original.donorName}</p>
+            )}
+            {row.original.purpose && <p className="truncate text-[11.5px] text-ink-muted">{row.original.purpose}</p>}
+          </div>
+        ),
+      },
+      {
+        id: 'fund',
+        header: t('common.fund'),
+        cell: ({ row }) => <span className="text-ink-muted">{row.original.fund.name}</span>,
+      },
+      {
+        id: 'mode',
+        header: t('donations.mode'),
+        cell: ({ row }) => <span className="text-ink-muted">{labels.donationMode[row.original.mode] ?? row.original.mode}</span>,
+      },
+      {
+        id: 'eligible80G',
+        header: '80G',
+        cell: ({ row }) =>
+          row.original.is80GEligible ? <Badge tone="success">80G</Badge> : <span className="text-[12px] text-ink-muted">—</span>,
+      },
+      {
+        id: 'amount',
+        header: t('common.amount'),
+        enableHiding: false,
+        meta: { align: 'right' },
+        cell: ({ row }) => <span className="font-semibold text-success">{formatCurrency(row.original.amount)}</span>,
+      },
+    ],
+    [t, labels],
+  );
+
+  const exportColumns: ExportColumn<DonationRow>[] = [
+    { header: t('donations.receiptNumber'), value: (row) => row.receiptNumber },
+    { header: t('common.date'), type: 'date', value: (row) => row.date },
+    { header: t('donations.donor'), value: (row) => row.donorName },
+    { header: t('donations.purpose'), value: (row) => row.purpose },
+    { header: t('common.fund'), value: (row) => row.fund.name },
+    { header: t('common.department'), value: (row) => row.department?.name },
+    { header: t('donations.mode'), value: (row) => labels.donationMode[row.mode] ?? row.mode },
+    { header: t('donations.receivedIn'), value: (row) => row.bankAccount?.name },
+    { header: t('common.referenceNumber'), value: (row) => row.referenceNumber },
+    { header: t('dataExport.cols.eligible80G'), value: (row) => (row.is80GEligible ? t('common.yes') : t('common.no')) },
+    { header: t('common.amount'), type: 'currency', value: (row) => row.amount },
+  ];
+
+  const receiveButton = (size?: 'sm') =>
+    can('donation.create') && (
+      <Button size={size} onClick={() => setDialogOpen(true)}>
+        <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+        {t('donations.receive')}
+      </Button>
+    );
 
   return (
     <>
@@ -103,12 +179,19 @@ export default function DonationsPage() {
         title={t('donations.title')}
         subtitle={t('donations.subtitle')}
         actions={
-          can('donation.create') && (
-            <Button onClick={() => setDialogOpen(true)}>
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-              {t('donations.receive')}
-            </Button>
-          )
+          <div className="flex flex-wrap items-center gap-2">
+            <ExportMenu
+              fileBase="donations"
+              title={t('donations.title')}
+              columns={exportColumns}
+              fetchRows={() =>
+                fetchAllPages((pageNumber, pageSize) =>
+                  api.get<DonationListResponse>('/donations' + buildQuery({ ...filters, page: pageNumber, pageSize })),
+                )
+              }
+            />
+            {receiveButton()}
+          </div>
         }
       />
 
@@ -137,8 +220,8 @@ export default function DonationsPage() {
             search={search}
             onSearchChange={(value) => setParam('search', value)}
             searchPlaceholder={t('donations.searchPlaceholder')}
-            activeCount={[fundId, mode].filter(Boolean).length}
-            onClear={() => setSearchParams(new URLSearchParams(), { replace: true })}
+            activeCount={activeFilterCount}
+            onClear={clearFilters}
             filters={
               <>
                 <FilterField label={t('common.fund')}>
@@ -168,106 +251,64 @@ export default function DonationsPage() {
           />
         </div>
 
-        {isLoading ? (
-          <TableSkeleton columns={6} />
-        ) : !data?.data.length ? (
-          <EmptyState
-            icon={HeartHandshake}
-            title={t('donations.emptyTitle')}
-            description={t('donations.emptyText')}
-            action={
-              can('donation.create') && (
-                <Button size="sm" onClick={() => setDialogOpen(true)}>
-                  <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                  {t('donations.receive')}
-                </Button>
-              )
-            }
-          />
-        ) : (
-          <>
-            <div className="hidden overflow-x-auto md:block">
-              <table className="w-full min-w-[720px] border-collapse">
-                <thead>
-                  <tr className="border-b border-line bg-canvas/60">
-                    {[t('donations.receiptNumber'), t('common.date'), t('donations.donor'), t('common.fund'), t('donations.mode'), '80G', t('common.amount')].map((heading, index) => (
-                      <th
-                        key={heading}
-                        scope="col"
-                        className={`px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-ink-muted ${index === 6 ? 'text-right' : 'text-left'}`}
-                      >
-                        {heading}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-line">
-                  {data.data.map((row) => (
-                    <tr key={row.id} className="transition-colors hover:bg-canvas/60">
-                      <td className="px-3 py-2.5 text-[12.5px] font-medium text-ink">{row.receiptNumber}</td>
-                      <td className="whitespace-nowrap px-3 py-2.5 text-[12.5px] text-ink-muted">{formatDate(row.date)}</td>
-                      <td className="px-3 py-2.5">
-                        {row.donor ? (
-                          <Link to={`/donors/${row.donor.id}`} className="text-[12.5px] font-medium text-brand-primary hover:underline">
-                            {row.donorName}
-                          </Link>
-                        ) : (
-                          <p className="text-[12.5px] font-medium text-ink">{row.donorName}</p>
-                        )}
-                        {row.purpose && <p className="truncate text-[11.5px] text-ink-muted">{row.purpose}</p>}
-                      </td>
-                      <td className="px-3 py-2.5 text-[12.5px] text-ink-muted">{row.fund.name}</td>
-                      <td className="px-3 py-2.5 text-[12.5px] text-ink-muted">
-                        {labels.donationMode[row.mode] ?? row.mode}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        {row.is80GEligible ? <Badge tone="success">80G</Badge> : <span className="text-[12px] text-ink-muted">—</span>}
-                      </td>
-                      <td className="px-3 py-2.5 text-right text-[12.5px] font-semibold text-success tnum">
-                        {formatCurrency(row.amount)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot className="border-t-2 border-brand-primary/25 bg-brand-light/40">
+        <DataTable
+          columns={columns}
+          data={data?.data ?? []}
+          isLoading={isLoading}
+          error={error as Error | null}
+          onRetry={() => void refetch()}
+          onClearFilters={clearFilters}
+          getRowId={(row) => row.id}
+          emptyState={
+            activeFilterCount || search ? undefined : (
+              <EmptyState
+                icon={HeartHandshake}
+                title={t('donations.emptyTitle')}
+                description={t('donations.emptyText')}
+                action={receiveButton('sm')}
+              />
+            )
+          }
+          footer={
+            data
+              ? ({ visibleColumnCount }) => (
                   <tr>
-                    <td colSpan={6} className="px-3 py-2.5 text-[12.5px] font-semibold text-ink">
+                    <td colSpan={visibleColumnCount - 1} className="px-3 py-2.5 text-[12.5px] font-semibold text-ink">
                       {t('donations.totalFiltered')}
                     </td>
                     <td className="px-3 py-2.5 text-right text-[12.5px] font-semibold text-ink tnum">
                       {formatCurrency(data.meta.totalAmount)}
                     </td>
                   </tr>
-                </tfoot>
-              </table>
+                )
+              : undefined
+          }
+          mobileCard={(row) => (
+            <div className="flex items-start gap-3 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[13px] font-medium text-ink">{row.donorName}</p>
+                <p className="mt-0.5 truncate text-[11.5px] text-ink-muted">
+                  {row.receiptNumber} · {row.fund.name}
+                </p>
+                <p className="mt-0.5 text-[11.5px] text-ink-muted">
+                  {formatDate(row.date)} · {labels.donationMode[row.mode] ?? row.mode}
+                </p>
+              </div>
+              <span className="shrink-0 text-[13px] font-semibold text-success tnum">{formatCurrency(row.amount)}</span>
             </div>
-
-            <ul className="divide-y divide-line md:hidden">
-              {data.data.map((row) => (
-                <li key={row.id} className="flex items-start gap-3 px-4 py-3">
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[13px] font-medium text-ink">{row.donorName}</p>
-                    <p className="mt-0.5 truncate text-[11.5px] text-ink-muted">
-                      {row.receiptNumber} · {row.fund.name}
-                    </p>
-                    <p className="mt-0.5 text-[11.5px] text-ink-muted">
-                      {formatDate(row.date)} · {labels.donationMode[row.mode] ?? row.mode}
-                    </p>
-                  </div>
-                  <span className="shrink-0 text-[13px] font-semibold text-success tnum">{formatCurrency(row.amount)}</span>
-                </li>
-              ))}
-            </ul>
-
-            <TablePagination
-              page={data.meta.page}
-              pageSize={data.meta.pageSize}
-              total={data.meta.total}
-              totalPages={data.meta.totalPages}
-              onPageChange={(value) => setParam('page', String(value))}
-            />
-          </>
-        )}
+          )}
+          pagination={
+            data
+              ? {
+                  page: data.meta.page,
+                  pageSize: data.meta.pageSize,
+                  total: data.meta.total,
+                  totalPages: data.meta.totalPages,
+                  onPageChange: (value) => setParam('page', String(value)),
+                }
+              : undefined
+          }
+        />
       </SectionCard>
 
       <DonationDialog
@@ -282,195 +323,5 @@ export default function DonationsPage() {
         }}
       />
     </>
-  );
-}
-
-const schema = z.object({
-  date: z.string().min(1, 'validation.selectDate'),
-  donorName: z.string().trim().min(2, 'donations.donorNameRequired'),
-  donorId: z.string().optional(),
-  amount: z.coerce.number().gt(0, 'validation.amountPositive'),
-  mode: z.enum(DONATION_MODES),
-  fundId: z.string().min(1, 'validation.selectFund'),
-  departmentId: z.string().optional(),
-  bankAccountId: z.string().optional(),
-  purpose: z.string().optional(),
-  referenceNumber: z.string().optional(),
-  is80GEligible: z.boolean(),
-  notes: z.string().optional(),
-});
-
-type DonationValues = z.infer<typeof schema>;
-
-export function DonationDialog({
-  open,
-  onOpenChange,
-  donor,
-  onRecorded,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  /** Pre-selects a donor when opened from their profile. */
-  donor?: { id: string; name: string };
-  onRecorded?: () => void;
-}) {
-  const { t } = useTranslation();
-  const labels = useLabels();
-  const { data: masters } = useMasters();
-
-  const {
-    register,
-    handleSubmit,
-    watch,
-    setValue,
-    reset,
-    setError,
-    formState: { errors, isSubmitting },
-  } = useForm<DonationValues>({
-    resolver: zodResolver(schema),
-    defaultValues: {
-      date: new Date().toISOString().slice(0, 10),
-      donorName: donor?.name ?? '',
-      donorId: donor?.id,
-      amount: 0,
-      mode: 'BANK_TRANSFER',
-      fundId: '',
-      is80GEligible: true,
-    },
-  });
-
-  const mutation = useMutation({
-    mutationFn: (values: DonationValues) => api.post('/donations', values),
-    onSuccess: () => {
-      toast.success(t('donations.recorded'), { description: t('donations.recordedText') });
-      onRecorded?.();
-      invalidateFinancialData();
-      queryClient.invalidateQueries({ queryKey: queryKeys.donationSummary });
-      reset();
-      onOpenChange(false);
-    },
-    onError: (error) => {
-      if (error instanceof ApiError) {
-        const fieldErrors = error.fieldErrors;
-        for (const [field, message] of Object.entries(fieldErrors)) setError(field as keyof DonationValues, { message });
-        if (Object.keys(fieldErrors).length === 0) toast.error(t('donations.failed'), { description: errorMessage(t, error) });
-      } else {
-        toast.error(t('donations.failed'));
-      }
-    },
-  });
-
-  const donorId = watch('donorId');
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent size="lg">
-        <DialogHeader>
-          <DialogTitle>{t('donations.receive')}</DialogTitle>
-          <DialogDescription>{t('donations.dialogText')}</DialogDescription>
-        </DialogHeader>
-        <form onSubmit={handleSubmit((values) => mutation.mutate(values))} noValidate className="flex min-h-0 flex-1 flex-col">
-          <DialogBody>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <FormField label={t('common.date')} htmlFor="don-date" required error={errors.date?.message}>
-                <DateInput id="don-date" max={new Date().toISOString().slice(0, 10)} invalid={Boolean(errors.date)} {...register('date')} />
-              </FormField>
-
-              <FormField label={t('common.amount')} htmlFor="don-amount" required error={errors.amount?.message}>
-                <MoneyInput id="don-amount" invalid={Boolean(errors.amount)} {...register('amount')} />
-              </FormField>
-
-              <FormField label={t('donations.existingDonor')} htmlFor="don-donor">
-                <SimpleSelect
-                  value={donorId}
-                  onValueChange={(value) => {
-                    setValue('donorId', value);
-                    const donor = masters?.donors.find((item) => item.id === value);
-                    if (donor) setValue('donorName', donor.name, { shouldValidate: true });
-                  }}
-                  options={(masters?.donors ?? []).map((donor) => ({ value: donor.id, label: donor.name }))}
-                  placeholder={t('donations.existingPlaceholder')}
-                  ariaLabel={t('donations.existingDonor')}
-                />
-              </FormField>
-
-              <FormField label={t('donations.donorName')} htmlFor="don-name" required error={errors.donorName?.message}>
-                <Input id="don-name" invalid={Boolean(errors.donorName)} {...register('donorName')} />
-              </FormField>
-
-              <FormField label={t('common.fund')} htmlFor="don-fund" required error={errors.fundId?.message}>
-                <SimpleSelect
-                  value={watch('fundId')}
-                  onValueChange={(value) => setValue('fundId', value, { shouldValidate: true })}
-                  options={(masters?.funds ?? []).map((fund) => ({ value: fund.id, label: fund.name }))}
-                  placeholder={t('wizard.selectFund')}
-                  invalid={Boolean(errors.fundId)}
-                  ariaLabel={t('common.fund')}
-                />
-              </FormField>
-
-              <FormField label={t('common.department')} htmlFor="don-department">
-                <SimpleSelect
-                  value={watch('departmentId')}
-                  onValueChange={(value) => setValue('departmentId', value)}
-                  options={(masters?.departments ?? []).map((item) => ({ value: item.id, label: item.name }))}
-                  placeholder={t('common.optional')}
-                  ariaLabel={t('common.department')}
-                />
-              </FormField>
-
-              <FormField label={t('donations.mode')} htmlFor="don-mode" required error={errors.mode?.message}>
-                <SimpleSelect
-                  value={watch('mode')}
-                  onValueChange={(value) => setValue('mode', value as DonationValues['mode'], { shouldValidate: true })}
-                  options={DONATION_MODES.map((item) => ({ value: item, label: labels.donationMode[item] }))}
-                  ariaLabel={t('donations.mode')}
-                />
-              </FormField>
-
-              <FormField label={t('donations.receivedIn')} htmlFor="don-account">
-                <SimpleSelect
-                  value={watch('bankAccountId')}
-                  onValueChange={(value) => setValue('bankAccountId', value)}
-                  options={(masters?.bankAccounts ?? []).map((account) => ({ value: account.id, label: account.name }))}
-                  placeholder={t('common.cashInHand')}
-                  ariaLabel={t('donations.receivedIn')}
-                />
-              </FormField>
-
-              <FormField label={t('donations.purpose')} htmlFor="don-purpose" className="sm:col-span-2">
-                <Input id="don-purpose" placeholder={t('donations.purposePlaceholder')} {...register('purpose')} />
-              </FormField>
-
-              <FormField label={t('common.referenceNumber')} htmlFor="don-reference">
-                <Input id="don-reference" placeholder={t('finance.referencePlaceholder')} {...register('referenceNumber')} />
-              </FormField>
-
-              <div className="flex items-end pb-1.5">
-                <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-ink">
-                  <Checkbox
-                    checked={watch('is80GEligible')}
-                    onCheckedChange={(checked) => setValue('is80GEligible', Boolean(checked))}
-                  />
-                  {t('donations.eligible80G')}
-                </label>
-              </div>
-
-              <FormField label={t('common.notes')} htmlFor="don-notes" className="sm:col-span-2">
-                <Textarea id="don-notes" rows={2} {...register('notes')} />
-              </FormField>
-            </div>
-          </DialogBody>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              {t('common.cancel')}
-            </Button>
-            <Button type="submit" loading={isSubmitting || mutation.isPending}>
-              {t('donations.record')}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
   );
 }

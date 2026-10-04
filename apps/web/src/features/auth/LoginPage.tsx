@@ -90,7 +90,7 @@ export default function LoginPage() {
       >
         <AshramScene />
         <div className="relative z-10 hidden lg:block">
-          <Brand size="lg" showTagline={false} className="mb-8" />
+          <Brand size="lg" className="mb-8" />
           <h2 className="max-w-md whitespace-pre-line text-[30px] font-semibold leading-tight text-white">
             {t('auth.heroTitle')}
           </h2>
@@ -113,7 +113,7 @@ export default function LoginPage() {
       <section className="flex flex-1 items-center justify-center px-5 py-8 sm:px-8 lg:py-12">
         <div className="w-full max-w-[380px]">
           <div className="mb-6 flex items-center justify-between gap-3 lg:mb-8">
-            <Brand size="md" tone="dark" className="hidden lg:flex" />
+            <Brand size="md" className="hidden lg:block" />
             <LanguageSwitcher signedIn={false} className="ml-auto" />
           </div>
 

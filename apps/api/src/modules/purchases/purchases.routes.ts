@@ -10,6 +10,7 @@ import { nextNumber } from '../../lib/sequence';
 import { AUDIT_ACTIONS, recordAudit } from '../../lib/audit';
 import { validate, validated } from '../../middleware/validate';
 import { getCurrentOrganization, getCurrentUser, requirePermission } from '../../middleware/auth';
+import { assertOwned } from '../../lib/ownership';
 
 export const purchasesRouter = Router();
 
@@ -145,6 +146,7 @@ purchasesRouter.post(
       if (!supplier) throw badRequest('Selected supplier is not available in this organization');
       if (!department) throw badRequest('Selected department is not available in this organization');
       if (!fund) throw badRequest('Selected fund is not available in this organization');
+      await assertOwned(auth.organizationId, { expenseCategory: body.categoryId }, tx);
 
       const totals = computeTotals(body.items);
       const orderNumber = await nextNumber(tx, auth.organizationId, 'PURCHASE', body.date);

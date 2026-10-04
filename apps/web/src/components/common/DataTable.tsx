@@ -17,6 +17,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Checkbox } from '@/components/ui/misc';
 import { ErrorState, NoResultsState, TableSkeleton } from './states';
 import { useTranslation } from 'react-i18next';
 import { errorMessage } from '@/i18n/errors';
@@ -45,7 +46,35 @@ export interface DataTableProps<T> {
   showColumnToggle?: boolean;
   onRowClick?: (row: T) => void;
   getRowId?: (row: T) => string;
-  footer?: ReactNode;
+  /**
+   * `<tr>` content for a totals row. A function receives the visible column
+   * count (including the selection column) so `colSpan` stays correct when
+   * columns are hidden.
+   */
+  footer?: ReactNode | ((context: { visibleColumnCount: number }) => ReactNode);
+  /**
+   * Opt-in row selection. Selection state lives with the caller (so it can
+   * span pages); the table renders a checkbox column and a page-level toggle.
+   * Requires `getRowId`.
+   */
+  selection?: DataTableSelection<T>;
+  /** Extra classes for a row, e.g. to tint flagged rows. */
+  rowClassName?: (row: T) => string | undefined;
+  /** Breakpoint at which `mobileCard` gives way to the table. Defaults to `md`. */
+  mobileBreakpoint?: 'sm' | 'md';
+  /** Overrides the table's minimum width class (default `min-w-[720px]`). */
+  tableClassName?: string;
+}
+
+export interface DataTableSelection<T> {
+  selectedIds: ReadonlySet<string>;
+  onToggleRow: (id: string, checked: boolean) => void;
+  /** Selects or clears every row on the current page. */
+  onTogglePage: (checked: boolean) => void;
+  /** Accessible label for a row's checkbox. */
+  rowLabel?: (row: T) => string;
+  /** Accessible label (and mobile caption) for the page toggle. */
+  pageLabel?: string;
 }
 
 export function DataTable<T>({
@@ -64,9 +93,21 @@ export function DataTable<T>({
   onRowClick,
   getRowId,
   footer,
+  selection,
+  rowClassName,
+  mobileBreakpoint = 'md',
+  tableClassName,
 }: DataTableProps<T>) {
   const { t } = useTranslation();
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
+  const rowKey = (row: T, index: number) => getRowId?.(row) ?? String(index);
+  const pageIds = selection ? data.map(rowKey) : [];
+  const pageSelectedCount = selection ? pageIds.filter((id) => selection.selectedIds.has(id)).length : 0;
+  const pageChecked: boolean | 'indeterminate' =
+    pageIds.length > 0 && pageSelectedCount === pageIds.length ? true : pageSelectedCount > 0 ? 'indeterminate' : false;
+  const pageLabel = selection?.pageLabel ?? t('dataTable.selectPage');
+  const showTableFrom = mobileBreakpoint === 'sm' ? 'hidden sm:block' : 'hidden md:block';
+  const showCardsUntil = mobileBreakpoint === 'sm' ? 'sm:hidden' : 'md:hidden';
 
   const table = useReactTable({
     data,
@@ -74,6 +115,8 @@ export function DataTable<T>({
     getCoreRowModel: getCoreRowModel(),
     manualSorting: true,
     manualPagination: true,
+    // Without a sort handler there is nothing to sort by, so headers stay plain.
+    enableSorting: Boolean(onSortingChange),
     state: { sorting, columnVisibility },
     onSortingChange: (updater) => {
       const next = typeof updater === 'function' ? updater(sorting) : updater;
@@ -120,16 +163,30 @@ export function DataTable<T>({
       )}
 
       {/* Desktop / tablet table */}
-      <div className={cn('overflow-x-auto', mobileCard && 'hidden md:block')}>
+      <div className={cn('overflow-x-auto', mobileCard && showTableFrom)}>
         {isLoading ? (
-          <TableSkeleton columns={columns.length} />
+          <TableSkeleton columns={columns.length + (selection ? 1 : 0)} />
         ) : data.length === 0 ? (
           (emptyState ?? <NoResultsState onClear={onClearFilters} />)
         ) : (
-          <table className="w-full min-w-[720px] border-collapse">
+          <table className={cn('w-full border-collapse', tableClassName ?? 'min-w-[720px]')}>
             <thead>
               {table.getHeaderGroups().map((headerGroup) => (
                 <tr key={headerGroup.id} className="border-b border-line bg-canvas/60">
+                  {selection && (
+                    <th
+                      scope="col"
+                      className="w-10 cursor-pointer px-3 py-2.5 hover:bg-brand-light/50"
+                      onClick={() => selection.onTogglePage(pageChecked !== true)}
+                    >
+                      <Checkbox
+                        checked={pageChecked}
+                        onCheckedChange={(checked) => selection.onTogglePage(checked === true)}
+                        onClick={(event) => event.stopPropagation()}
+                        aria-label={pageLabel}
+                      />
+                    </th>
+                  )}
                   {headerGroup.headers.map((header) => {
                     const canSort = header.column.getCanSort();
                     const sorted = header.column.getIsSorted();
@@ -179,6 +236,8 @@ export function DataTable<T>({
                   className={cn(
                     'transition-colors hover:bg-canvas/70',
                     onRowClick && 'cursor-pointer',
+                    selection?.selectedIds.has(row.id) && 'bg-brand-light/40',
+                    rowClassName?.(row.original),
                   )}
                   onClick={onRowClick ? () => onRowClick(row.original) : undefined}
                   tabIndex={onRowClick ? 0 : undefined}
@@ -190,6 +249,25 @@ export function DataTable<T>({
                       : undefined
                   }
                 >
+                  {selection && (
+                    // The whole cell is the hit area — a 16px box is easy to miss, and a
+                    // near-miss would otherwise fall through to the row click.
+                    <td
+                      className="cursor-pointer px-3 py-2.5 hover:bg-brand-light/50"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        selection.onToggleRow(row.id, !selection.selectedIds.has(row.id));
+                      }}
+                      onKeyDown={(event) => event.stopPropagation()}
+                    >
+                      <Checkbox
+                        checked={selection.selectedIds.has(row.id)}
+                        onCheckedChange={(checked) => selection.onToggleRow(row.id, checked === true)}
+                        onClick={(event) => event.stopPropagation()}
+                        aria-label={selection.rowLabel?.(row.original) ?? t('dataTable.selectRow')}
+                      />
+                    </td>
+                  )}
                   {row.getVisibleCells().map((cell) => {
                     const align = (cell.column.columnDef.meta as { align?: string } | undefined)?.align;
                     return (
@@ -207,14 +285,20 @@ export function DataTable<T>({
                 </tr>
               ))}
             </tbody>
-            {footer && <tfoot className="border-t-2 border-brand-primary/30 bg-brand-light/40">{footer}</tfoot>}
+            {footer && (
+              <tfoot className="border-t-2 border-brand-primary/30 bg-brand-light/40">
+                {typeof footer === 'function'
+                  ? footer({ visibleColumnCount: table.getVisibleLeafColumns().length + (selection ? 1 : 0) })
+                  : footer}
+              </tfoot>
+            )}
           </table>
         )}
       </div>
 
       {/* Mobile cards */}
       {mobileCard && (
-        <div className="md:hidden">
+        <div className={showCardsUntil}>
           {isLoading ? (
             <div className="space-y-2 p-3">
               {Array.from({ length: 4 }).map((_, index) => (
@@ -225,9 +309,40 @@ export function DataTable<T>({
             (emptyState ?? <NoResultsState onClear={onClearFilters} />)
           ) : (
             <ul className="divide-y divide-line">
-              {data.map((row, index) => (
-                <li key={getRowId?.(row) ?? index}>{mobileCard(row)}</li>
-              ))}
+              {selection && (
+                <li
+                  className="flex cursor-pointer items-center gap-3 bg-canvas/60 px-4 py-2"
+                  onClick={() => selection.onTogglePage(pageChecked !== true)}
+                >
+                  <Checkbox
+                    checked={pageChecked}
+                    onCheckedChange={(checked) => selection.onTogglePage(checked === true)}
+                    onClick={(event) => event.stopPropagation()}
+                    aria-label={pageLabel}
+                  />
+                  <span className="text-[12px] text-ink-muted">{pageLabel}</span>
+                </li>
+              )}
+              {data.map((row, index) => {
+                const id = rowKey(row, index);
+                if (!selection) return <li key={id}>{mobileCard(row)}</li>;
+                return (
+                  <li key={id} className={cn('flex items-start', selection.selectedIds.has(id) && 'bg-brand-light/40')}>
+                    <div
+                      className="shrink-0 cursor-pointer self-stretch pl-4 pr-1 pt-3.5"
+                      onClick={() => selection.onToggleRow(id, !selection.selectedIds.has(id))}
+                    >
+                      <Checkbox
+                        checked={selection.selectedIds.has(id)}
+                        onCheckedChange={(checked) => selection.onToggleRow(id, checked === true)}
+                        onClick={(event) => event.stopPropagation()}
+                        aria-label={selection.rowLabel?.(row) ?? t('dataTable.selectRow')}
+                      />
+                    </div>
+                    <div className="min-w-0 flex-1">{mobileCard(row)}</div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

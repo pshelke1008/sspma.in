@@ -48,6 +48,12 @@ export const queryKeys = {
   whatsappTemplates: ['whatsapp', 'templates'] as const,
   broadcasts: ['whatsapp', 'broadcasts'] as const,
   broadcast: (id: string) => ['whatsapp', 'broadcast', id] as const,
+  inboxConversations: (params: unknown) => ['whatsapp', 'inbox', 'conversations', params] as const,
+  inboxConversation: (phone: string) => ['whatsapp', 'inbox', 'conversation', phone] as const,
+  inboxThread: (phone: string) => ['whatsapp', 'inbox', 'thread', phone] as const,
+  inboxUnread: ['whatsapp', 'inbox', 'unread'] as const,
+  inboxNumbers: ['whatsapp', 'inbox', 'numbers'] as const,
+  inboxTemplates: (numberId: string) => ['whatsapp', 'inbox', 'templates', numberId] as const,
 };
 
 /** Called after any workflow action so every dependent view refreshes. */
@@ -61,4 +67,13 @@ export function invalidateFinancialData() {
   queryClient.invalidateQueries({ queryKey: ['report'] });
   queryClient.invalidateQueries({ queryKey: ['banking'] });
   queryClient.invalidateQueries({ queryKey: ['audit-logs'] });
+}
+
+/** Called after a donation or donor change: lists, summaries, profiles and the finance views. */
+export function invalidateDonationData() {
+  invalidateFinancialData();
+  queryClient.invalidateQueries({ queryKey: ['donations'] });
+  queryClient.invalidateQueries({ queryKey: ['donors'] });
+  queryClient.invalidateQueries({ queryKey: ['donor'] });
+  queryClient.invalidateQueries({ queryKey: queryKeys.masters });
 }

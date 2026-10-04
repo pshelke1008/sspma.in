@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
@@ -15,11 +15,12 @@ import {
   Plus,
   ReceiptText,
   RotateCcw,
+  Trash2,
   UserX,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api/client';
-import { queryClient, queryKeys } from '@/lib/api/queryClient';
+import { invalidateDonationData, queryClient, queryKeys } from '@/lib/api/queryClient';
 import { useAuth } from '@/lib/auth/AuthProvider';
 import { errorMessage } from '@/i18n/errors';
 import { useLabels } from '@/i18n/useLabels';
@@ -35,9 +36,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { BarChart } from '@/components/charts';
 import { formatCurrency, formatDate } from '@/lib/utils/format';
 import { cn } from '@/lib/utils/cn';
-import { DonationDialog } from '@/features/donations/DonationsPage';
+import { DonationDialog } from '@/features/donations/DonationDialog';
 import { SendMessageDialog } from '@/features/whatsapp/SendMessageDialog';
 import { MESSAGE_TONES } from '@/features/whatsapp/api';
+import { DonorWhatsAppChat } from '@/features/whatsapp/inbox/DonorWhatsAppChat';
 import { DonorFormDialog } from './DonorFormDialog';
 import type { DonorProfile } from './types';
 
@@ -51,6 +53,8 @@ export default function DonorProfilePage() {
   const [donationOpen, setDonationOpen] = useState(false);
   const [messageOpen, setMessageOpen] = useState(false);
   const [confirmDeactivate, setConfirmDeactivate] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const navigate = useNavigate();
 
   const { data: donor, isLoading, error, refetch } = useQuery({
     queryKey: queryKeys.donor(id),
@@ -70,6 +74,21 @@ export default function DonorProfilePage() {
     onError: (err) => toast.error(t('donors.saveFailed'), { description: errorMessage(t, err) }),
   });
 
+  const remove = useMutation({
+    mutationFn: () => api.delete(`/donors/${id}/permanent`),
+    onSuccess: () => {
+      toast.success(t('donors.deleted'));
+      setConfirmDelete(false);
+      queryClient.removeQueries({ queryKey: queryKeys.donor(id) });
+      invalidateDonationData();
+      navigate('/donors', { replace: true });
+    },
+    onError: (err) => {
+      setConfirmDelete(false);
+      toast.error(t('donors.deleteFailed'), { description: errorMessage(t, err) });
+    },
+  });
+
   if (error) return <ErrorState message={errorMessage(t, error)} onRetry={() => void refetch()} />;
 
   if (isLoading || !donor) {
@@ -81,7 +100,7 @@ export default function DonorProfilePage() {
     );
   }
 
-  const address = [donor.addressLine1, donor.addressLine2, donor.city, donor.state, donor.postalCode]
+  const address = [donor.addressLine1, donor.addressLine2, donor.village, donor.district, donor.state, donor.postalCode]
     .filter(Boolean)
     .join(', ');
   const cannotMessageReason = donor.messaging.reason ? t(`donors.reason.${donor.messaging.reason}`) : undefined;
@@ -196,9 +215,7 @@ export default function DonorProfilePage() {
 
           <dl className="mt-3 grid grid-cols-2 gap-3 border-t border-line pt-3 text-[12.5px]">
             <Field label={t('donors.pan')} value={donor.panNumber} />
-            <Field label={t('donors.preferredLanguage')} value={t(`language.${donor.preferredLanguage}`)} />
-            <Field label={t('donors.dateOfBirth')} value={donor.dateOfBirth ? formatDate(donor.dateOfBirth) : null} />
-            <Field label={t('donors.anniversary')} value={donor.anniversaryDate ? formatDate(donor.anniversaryDate) : null} />
+            <Field label={t('donors.aadhaar')} value={donor.aadhaarMasked} />
           </dl>
 
           {(donor.tags.length > 0 || donor.notes) && (
@@ -224,9 +241,9 @@ export default function DonorProfilePage() {
             </dl>
           )}
 
-          {can('donor.manage') && (
-            <div className="mt-4 border-t border-line pt-3">
-              {donor.isActive ? (
+          {(can('donor.manage') || can('donor.delete')) && (
+            <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-3">
+              {!can('donor.manage') ? null : donor.isActive ? (
                 <Button variant="danger-outline" size="sm" onClick={() => setConfirmDeactivate(true)}>
                   <UserX className="h-3.5 w-3.5" aria-hidden="true" />
                   {t('donors.deactivate')}
@@ -236,6 +253,23 @@ export default function DonorProfilePage() {
                   <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                   {t('donors.restore')}
                 </Button>
+              )}
+              {can('donor.delete') && (
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => setConfirmDelete(true)}
+                  disabled={donor.stats.donationCount > 0}
+                  aria-describedby={donor.stats.donationCount > 0 ? 'donor-delete-hint' : undefined}
+                >
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  {t('donors.delete')}
+                </Button>
+              )}
+              {can('donor.delete') && donor.stats.donationCount > 0 && (
+                <p id="donor-delete-hint" className="w-full text-[11.5px] text-ink-muted">
+                  {t('donors.deleteBlocked', { count: donor.stats.donationCount })}
+                </p>
               )}
             </div>
           )}
@@ -339,40 +373,44 @@ export default function DonorProfilePage() {
             </TabsContent>
 
             <TabsContent value="messages">
-              <SectionCard noPadding>
-                {donor.messages.length === 0 ? (
-                  <EmptyState icon={MessageCircle} title={t('donors.noMessages')} description={t('donors.noMessagesText')} />
-                ) : (
-                  <ol className="space-y-3 p-4">
-                    {donor.messages.map((message) => {
-                      const inbound = message.direction === 'INBOUND';
-                      return (
-                        <li key={message.id} className={cn('flex', inbound ? 'justify-start' : 'justify-end')}>
-                          <div
-                            className={cn(
-                              'max-w-[85%] rounded-[12px] px-3 py-2 shadow-sm',
-                              inbound ? 'rounded-tl-sm border border-line bg-white' : 'rounded-tr-sm bg-brand-light',
-                            )}
-                          >
-                            <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-ink">{message.body ?? '—'}</p>
-                            <div className="mt-1.5 flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-[10.5px] text-ink-muted">
-                              <span>{formatDate(message.sentAt ?? message.createdAt, 'long')}</span>
-                              {!inbound && message.sentBy && <span>· {message.sentBy.name}</span>}
-                              <span>· {t(`whatsapp.provider.${message.provider}`)}</span>
-                              <Badge tone={MESSAGE_TONES[message.status]}>{t(`whatsapp.messageStatus.${message.status}`)}</Badge>
+              {can('whatsapp.inbox') && donor.messaging.number ? (
+                <DonorWhatsAppChat phone={donor.messaging.number} />
+              ) : (
+                <SectionCard noPadding>
+                  {donor.messages.length === 0 ? (
+                    <EmptyState icon={MessageCircle} title={t('donors.noMessages')} description={t('donors.noMessagesText')} />
+                  ) : (
+                    <ol className="space-y-3 p-4">
+                      {donor.messages.map((message) => {
+                        const inbound = message.direction === 'INBOUND';
+                        return (
+                          <li key={message.id} className={cn('flex', inbound ? 'justify-start' : 'justify-end')}>
+                            <div
+                              className={cn(
+                                'max-w-[85%] rounded-[12px] px-3 py-2 shadow-sm',
+                                inbound ? 'rounded-tl-sm border border-line bg-white' : 'rounded-tr-sm bg-brand-light',
+                              )}
+                            >
+                              <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-ink">{message.body ?? '—'}</p>
+                              <div className="mt-1.5 flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-[10.5px] text-ink-muted">
+                                <span>{formatDate(message.sentAt ?? message.createdAt, 'long')}</span>
+                                {!inbound && message.sentBy && <span>· {message.sentBy.name}</span>}
+                                <span>· {t(`whatsapp.provider.${message.provider}`)}</span>
+                                <Badge tone={MESSAGE_TONES[message.status]}>{t(`whatsapp.messageStatus.${message.status}`)}</Badge>
+                              </div>
+                              {message.error && (
+                                <p className="mt-1 text-[11px] text-danger">
+                                  {t(`errors.${message.error}`, { defaultValue: message.error })}
+                                </p>
+                              )}
                             </div>
-                            {message.error && (
-                              <p className="mt-1 text-[11px] text-danger">
-                                {t(`errors.${message.error}`, { defaultValue: message.error })}
-                              </p>
-                            )}
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ol>
-                )}
-              </SectionCard>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  )}
+                </SectionCard>
+              )}
             </TabsContent>
           </Tabs>
         </div>
@@ -407,6 +445,17 @@ export default function DonorProfilePage() {
         tone="danger"
         loading={setActive.isPending}
         onConfirm={() => setActive.mutate(false)}
+      />
+
+      <ConfirmationDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={t('donors.deleteTitle')}
+        description={t('donors.deleteText', { name: donor.name })}
+        confirmLabel={t('donors.deletePermanently')}
+        tone="danger"
+        loading={remove.isPending}
+        onConfirm={() => remove.mutate()}
       />
     </>
   );

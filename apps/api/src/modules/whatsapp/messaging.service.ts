@@ -17,6 +17,9 @@ import * as manager from './connectionManager';
 import { cloudCredentials, getOrCreateChannel, reserveWebSend, resolveSender } from './channel.service';
 import { WhatsAppError, WhatsAppErrorCode, sanitizeError, type WhatsAppErrorCodeValue } from './errors';
 import { normalizePhone } from './phone';
+import { findByPhoneNumberId } from './numbers.service';
+import { fetchInboundMedia } from './media.service';
+import { findDonorByPhone } from './link';
 
 export interface MessageContent {
   body?: string | null;
@@ -44,7 +47,7 @@ interface RenderContext {
   organization: string;
 }
 
-async function contextsFor(organizationId: string, donors: DonorForMessaging[]): Promise<Map<string, RenderContext>> {
+export async function contextsFor(organizationId: string, donors: DonorForMessaging[]): Promise<Map<string, RenderContext>> {
   const [stats, organization] = await Promise.all([
     statsFor(organizationId, donors.map((donor) => donor.id)),
     prisma.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { name: true } }),
@@ -80,20 +83,20 @@ export function render(text: string, context: RenderContext): string {
 
 type Eligibility = 'OK' | 'INACTIVE' | 'NO_NUMBER' | 'NOT_OPTED_IN';
 
-function eligibilityOf(donor: DonorForMessaging): Eligibility {
+export function eligibilityOf(donor: DonorForMessaging): Eligibility {
   if (!donor.isActive) return 'INACTIVE';
   if (!messagingNumber(donor)) return 'NO_NUMBER';
   if (!donor.whatsappOptIn) return 'NOT_OPTED_IN';
   return 'OK';
 }
 
-const ELIGIBILITY_ERROR: Record<Exclude<Eligibility, 'OK'>, WhatsAppErrorCodeValue> = {
+export const ELIGIBILITY_ERROR: Record<Exclude<Eligibility, 'OK'>, WhatsAppErrorCodeValue> = {
   INACTIVE: WhatsAppErrorCode.DONOR_INACTIVE,
   NO_NUMBER: WhatsAppErrorCode.INVALID_NUMBER,
   NOT_OPTED_IN: WhatsAppErrorCode.NOT_OPTED_IN,
 };
 
-function assertContentFits(provider: WhatsAppProvider, content: MessageContent) {
+export function assertContentFits(provider: WhatsAppProvider, content: MessageContent) {
   if (content.templateName && provider !== 'CLOUD_API') {
     throw new WhatsAppError(WhatsAppErrorCode.TEMPLATE_NEEDS_CLOUD);
   }
@@ -104,12 +107,17 @@ function assertContentFits(provider: WhatsAppProvider, content: MessageContent) 
 
 // ----------------------------- Delivery ---------------------------------------
 
-async function deliver(
+/**
+ * Sends through the given provider. For the Cloud API, `numberId` picks which
+ * connected business number sends; without it the organization's default does.
+ */
+export async function deliver(
   organizationId: string,
   provider: WhatsAppProvider,
   phone: string,
   content: { body: string | null; templateName: string | null; templateLanguage: string | null; templateParams: string[] },
-): Promise<string> {
+  numberId?: string | null,
+): Promise<{ providerMessageId: string; numberId: string | null }> {
   if (provider === 'WEB_QR') {
     if (!manager.isLive(organizationId)) throw new WhatsAppError(WhatsAppErrorCode.NOT_CONNECTED);
     try {
@@ -117,7 +125,7 @@ async function deliver(
         throw new WhatsAppError(WhatsAppErrorCode.NOT_ON_WHATSAPP);
       }
       await reserveWebSend(organizationId);
-      return await manager.sendText(organizationId, phone, content.body ?? '');
+      return { providerMessageId: await manager.sendText(organizationId, phone, content.body ?? ''), numberId: null };
     } catch (error) {
       if (error instanceof WhatsAppError) throw error;
       if (error instanceof Error && error.message === 'NOT_CONNECTED') {
@@ -128,19 +136,19 @@ async function deliver(
     }
   }
 
-  const credentials = await cloudCredentials(organizationId);
-  if (content.templateName) {
-    return cloud.sendTemplate(credentials.phoneNumberId, credentials.token, phone, {
-      name: content.templateName,
-      language: content.templateLanguage ?? 'en',
-      bodyParams: content.templateParams,
-    });
-  }
-  return cloud.sendText(credentials.phoneNumberId, credentials.token, phone, content.body ?? '');
+  const credentials = await cloudCredentials(organizationId, numberId);
+  const providerMessageId = content.templateName
+    ? await cloud.sendTemplate(credentials.phoneNumberId, credentials.token, phone, {
+        name: content.templateName,
+        language: content.templateLanguage ?? 'en',
+        bodyParams: content.templateParams,
+      })
+    : await cloud.sendText(credentials.phoneNumberId, credentials.token, phone, content.body ?? '');
+  return { providerMessageId, numberId: credentials.numberId };
 }
 
 /** Readable record of a template send for the donor timeline. */
-function templateSummary(name: string, params: string[]): string {
+export function templateSummary(name: string, params: string[]): string {
   return params.length ? `[${name}] ${params.join(' · ')}` : `[${name}]`;
 }
 
@@ -174,7 +182,7 @@ export async function sendToDonor(auth: AuthContext, donorId: string, content: M
   });
 
   try {
-    const providerMessageId = await deliver(auth.organizationId, provider, phone, {
+    const delivered = await deliver(auth.organizationId, provider, phone, {
       body,
       templateName: content.templateName ?? null,
       templateLanguage: content.templateLanguage ?? null,
@@ -182,7 +190,12 @@ export async function sendToDonor(auth: AuthContext, donorId: string, content: M
     });
     const sent = await prisma.whatsAppMessage.update({
       where: { id: message.id },
-      data: { status: 'SENT', providerMessageId: providerMessageId || null, sentAt: new Date() },
+      data: {
+        status: 'SENT',
+        providerMessageId: delivered.providerMessageId || null,
+        whatsappNumberId: delivered.numberId,
+        sentAt: new Date(),
+      },
       include: { sentBy: { select: { id: true, name: true } } },
     });
 
@@ -373,7 +386,7 @@ export async function runBroadcast(broadcastId: string): Promise<void> {
         const body = broadcast.body ? render(broadcast.body, context) : null;
         const templateParams = broadcast.templateParams.map((param) => render(param, context));
 
-        const providerMessageId = await deliver(broadcast.organizationId, broadcast.provider, message.phone, {
+        const delivered = await deliver(broadcast.organizationId, broadcast.provider, message.phone, {
           body,
           templateName: broadcast.templateName,
           templateLanguage: broadcast.templateLanguage,
@@ -384,7 +397,8 @@ export async function runBroadcast(broadcastId: string): Promise<void> {
           where: { id: message.id },
           data: {
             status: 'SENT',
-            providerMessageId: providerMessageId || null,
+            providerMessageId: delivered.providerMessageId || null,
+            whatsappNumberId: delivered.numberId,
             sentAt: new Date(),
             body: broadcast.templateName ? templateSummary(broadcast.templateName, templateParams) : body,
           },
@@ -545,12 +559,19 @@ async function applyReceipt(
   if (message.broadcastId) await recount(message.broadcastId);
 }
 
+interface InboundExtras {
+  numberId?: string | null;
+  contactName?: string | null;
+  media?: { kind: string; mediaId: string; fileName?: string | null; mimeType?: string | null } | null;
+}
+
 async function recordInbound(
   organizationId: string,
   provider: WhatsAppProvider,
   rawPhone: string,
   text: string,
   providerMessageId: string,
+  extras: InboundExtras = {},
 ) {
   const phone = normalizePhone(rawPhone) ?? rawPhone;
   if (providerMessageId) {
@@ -561,31 +582,34 @@ async function recordInbound(
     if (duplicate) return;
   }
 
-  // Numbers are stored as typed, so match on the last ten digits and confirm
-  // by normalising, rather than trusting a formatted string compare.
-  const tail = phone.slice(-10);
-  const candidates = await prisma.donor.findMany({
-    where: { organizationId, OR: [{ phone: { contains: tail } }, { whatsappNumber: { contains: tail } }] },
-    select: { id: true, phone: true, whatsappNumber: true },
-    take: 5,
-  });
-  const donor = candidates.find(
-    (candidate) => normalizePhone(candidate.whatsappNumber) === phone || normalizePhone(candidate.phone) === phone,
-  );
+  const donor = await findDonorByPhone(organizationId, phone);
 
-  await prisma.whatsAppMessage.create({
+  const created = await prisma.whatsAppMessage.create({
     data: {
       organizationId,
       donorId: donor?.id ?? null,
+      whatsappNumberId: extras.numberId ?? null,
       direction: 'INBOUND',
       provider,
       phone,
-      body: text.slice(0, 4096),
+      body: text ? text.slice(0, 4096) : null,
+      contactName: extras.contactName?.slice(0, 160) ?? null,
+      mediaType: extras.media?.kind ?? null,
+      mediaFileName: extras.media?.fileName ?? null,
+      mediaMimeType: extras.media?.mimeType ?? null,
       status: 'RECEIVED',
       providerMessageId: providerMessageId || null,
       sentAt: new Date(),
     },
   });
+
+  // Media is fetched from Meta after the row exists, so a slow download never
+  // loses the message itself.
+  if (extras.media && extras.numberId) {
+    await fetchInboundMedia(created.id, organizationId, extras.numberId, extras.media).catch((error) =>
+      console.warn('[whatsapp] inbound media download failed', sanitizeError(error)),
+    );
+  }
 }
 
 /** Wires the linked-device socket events to the same records the webhook uses. */
@@ -596,11 +620,19 @@ export function registerLinkedDeviceHandlers() {
   });
 }
 
+interface CloudMediaObject {
+  id?: string;
+  caption?: string;
+  filename?: string;
+  mime_type?: string;
+}
+
 interface CloudWebhookPayload {
   entry?: {
     changes?: {
       value?: {
         metadata?: { phone_number_id?: string };
+        contacts?: { wa_id?: string; profile?: { name?: string } }[];
         statuses?: { id: string; status: string; errors?: { code?: number }[] }[];
         messages?: {
           id: string;
@@ -609,12 +641,18 @@ interface CloudWebhookPayload {
           text?: { body?: string };
           button?: { text?: string };
           interactive?: { button_reply?: { title?: string }; list_reply?: { title?: string } };
-          image?: { caption?: string };
+          image?: CloudMediaObject;
+          document?: CloudMediaObject;
+          audio?: CloudMediaObject;
+          video?: CloudMediaObject;
+          sticker?: CloudMediaObject;
         }[];
       };
     }[];
   }[];
 }
+
+const MEDIA_KINDS = ['image', 'document', 'audio', 'video', 'sticker'] as const;
 
 export async function processCloudWebhook(payload: CloudWebhookPayload) {
   for (const entry of payload.entry ?? []) {
@@ -624,11 +662,8 @@ export async function processCloudWebhook(payload: CloudWebhookPayload) {
       if (!value || !phoneNumberId) continue;
 
       // Callbacks are routed to a tenant by the business number they belong to.
-      const channel = await prisma.whatsAppChannel.findFirst({
-        where: { cloudPhoneNumberId: phoneNumberId },
-        select: { organizationId: true },
-      });
-      if (!channel) continue;
+      const number = await findByPhoneNumberId(phoneNumberId);
+      if (!number) continue;
 
       for (const status of value.statuses ?? []) {
         const mapped =
@@ -649,18 +684,25 @@ export async function processCloudWebhook(payload: CloudWebhookPayload) {
             : code === 131026
               ? WhatsAppErrorCode.NOT_ON_WHATSAPP
               : WhatsAppErrorCode.SEND_FAILED;
-        await applyReceipt(channel.organizationId, status.id, mapped, mapped === 'FAILED' ? error : undefined);
+        await applyReceipt(number.organizationId, status.id, mapped, mapped === 'FAILED' ? error : undefined);
       }
 
+      const names = new Map((value.contacts ?? []).map((contact) => [contact.wa_id ?? '', contact.profile?.name ?? null]));
       for (const message of value.messages ?? []) {
+        const kind = MEDIA_KINDS.find((item) => item === message.type);
+        const media = kind ? message[kind] : undefined;
         const text =
           message.text?.body ??
           message.button?.text ??
           message.interactive?.button_reply?.title ??
           message.interactive?.list_reply?.title ??
-          message.image?.caption ??
-          `[${message.type}]`;
-        await recordInbound(channel.organizationId, 'CLOUD_API', message.from, text, message.id);
+          media?.caption ??
+          (kind ? '' : `[${message.type}]`);
+        await recordInbound(number.organizationId, 'CLOUD_API', message.from, text, message.id, {
+          numberId: number.id,
+          contactName: names.get(message.from) ?? null,
+          media: kind && media?.id ? { kind, mediaId: media.id, fileName: media.filename ?? null, mimeType: media.mime_type ?? null } : null,
+        });
       }
     }
   }

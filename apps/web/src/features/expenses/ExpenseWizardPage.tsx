@@ -16,7 +16,7 @@ import { ConfirmationDialog } from '@/components/common/ConfirmationDialog';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/misc';
 import { validateFile, type PendingFile } from '@/components/common/FileUpload';
-import { formatCurrency } from '@/lib/utils/format';
+import { formatCurrency, todayLocal } from '@/lib/utils/format';
 import {
   basicInfoSchema,
   computeTotals,
@@ -85,7 +85,7 @@ export default function ExpenseWizardPage() {
     resolver: zodResolver(basicInfoSchema.partial()) as never,
     mode: 'onChange',
     defaultValues: {
-      date: new Date().toISOString().slice(0, 10),
+      date: todayLocal(),
       title: '',
       departmentId: '',
       fundId: '',
@@ -99,7 +99,7 @@ export default function ExpenseWizardPage() {
       paymentMethod: undefined,
       paymentAccountId: '',
       referenceNumber: '',
-      paymentDate: new Date().toISOString().slice(0, 10),
+      paymentDate: todayLocal(),
       notes: '',
     },
   });
@@ -134,7 +134,7 @@ export default function ExpenseWizardPage() {
       paymentMethod: (existing.paymentMethod ?? undefined) as never,
       paymentAccountId: existing.paymentAccountId ?? '',
       referenceNumber: existing.referenceNumber ?? '',
-      paymentDate: existing.paymentDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10),
+      paymentDate: existing.paymentDate?.slice(0, 10) ?? todayLocal(),
       notes: existing.notes ?? '',
     });
     setFurthest(3);

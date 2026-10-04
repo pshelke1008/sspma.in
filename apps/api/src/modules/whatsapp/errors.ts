@@ -28,6 +28,11 @@ export const WhatsAppErrorCode = {
   TEMPLATE_NEEDS_CLOUD: 'WHATSAPP_TEMPLATE_NEEDS_CLOUD',
   EMPTY_MESSAGE: 'WHATSAPP_EMPTY_MESSAGE',
   NO_RECIPIENTS: 'WHATSAPP_NO_RECIPIENTS',
+  MEDIA_NEEDS_CLOUD: 'WHATSAPP_MEDIA_NEEDS_CLOUD',
+  OAUTH_NOT_CONFIGURED: 'WHATSAPP_OAUTH_NOT_CONFIGURED',
+  OAUTH_EXPIRED: 'WHATSAPP_OAUTH_EXPIRED',
+  OAUTH_NO_ACCOUNTS: 'WHATSAPP_OAUTH_NO_ACCOUNTS',
+  OAUTH_FAILED: 'WHATSAPP_OAUTH_FAILED',
 } as const;
 
 export type WhatsAppErrorCodeValue = (typeof WhatsAppErrorCode)[keyof typeof WhatsAppErrorCode];
@@ -55,6 +60,11 @@ const MESSAGES: Record<WhatsAppErrorCodeValue, string> = {
   WHATSAPP_TEMPLATE_NEEDS_CLOUD: 'Message templates can only be sent through the WhatsApp Cloud API.',
   WHATSAPP_EMPTY_MESSAGE: 'Write a message or choose a template.',
   WHATSAPP_NO_RECIPIENTS: 'None of the selected donors were found.',
+  WHATSAPP_MEDIA_NEEDS_CLOUD: 'Photos and documents can only be sent through the WhatsApp Cloud API.',
+  WHATSAPP_OAUTH_NOT_CONFIGURED: 'Connect with Facebook is not set up on this server: WHATSAPP_APP_ID and WHATSAPP_APP_SECRET are needed.',
+  WHATSAPP_OAUTH_EXPIRED: 'The Facebook sign-in expired before a number was chosen. Please connect again.',
+  WHATSAPP_OAUTH_NO_ACCOUNTS: 'No WhatsApp Business account with messaging permission was shared. Connect again and allow access to your WhatsApp account.',
+  WHATSAPP_OAUTH_FAILED: 'Could not finish connecting to Facebook. Please try again.',
 };
 
 /** Problems with the request itself rather than the connection. */
@@ -62,6 +72,7 @@ const BAD_REQUEST_CODES = new Set<WhatsAppErrorCodeValue>([
   'WHATSAPP_TEMPLATE_NEEDS_CLOUD',
   'WHATSAPP_EMPTY_MESSAGE',
   'WHATSAPP_NO_RECIPIENTS',
+  'WHATSAPP_MEDIA_NEEDS_CLOUD',
 ]);
 
 export class WhatsAppError extends AppError {

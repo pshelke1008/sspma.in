@@ -6,6 +6,8 @@
  *
  *   npm run test:e2e
  */
+import crypto from 'node:crypto';
+import http from 'node:http';
 import path from 'node:path';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import dotenv from 'dotenv';
@@ -23,6 +25,134 @@ const BASE = process.env.E2E_API_URL ?? `http://localhost:${TEST_PORT}/api`;
 const PASSWORD = 'Ashram@2026';
 const ROOT = path.resolve(__dirname, '../../../..');
 
+/**
+ * The suite drops and reseeds its database, so it must never run against the
+ * development or a production database. It uses TEST_DATABASE_URL, or else the
+ * DATABASE_URL with `_test` appended to the database name, and refuses any
+ * database whose name does not end in `_test`.
+ */
+function testDatabaseUrl(): string {
+  const explicit = process.env.TEST_DATABASE_URL;
+  const source = explicit ?? process.env.DATABASE_URL;
+  if (!source) throw new Error('Set TEST_DATABASE_URL (or DATABASE_URL) before running the e2e suite');
+  const url = new URL(source);
+  if (!explicit) url.pathname = `${url.pathname.replace(/_test$/, '')}_test`;
+  const name = url.pathname.replace(/^\//, '');
+  if (!name.endsWith('_test')) {
+    throw new Error(`Refusing to reset database "${name}": the e2e database name must end in "_test"`);
+  }
+  return url.toString();
+}
+
+/**
+ * A stand-in for Meta's Graph API, so "Connect with Facebook" runs end to end
+ * without a real Meta app: code exchange, token inspection, account and number
+ * discovery, number verification and the webhook subscription.
+ */
+const GRAPH_PORT = Number(process.env.E2E_GRAPH_PORT ?? 4398);
+const META_APP_ID = 'e2e-meta-app';
+const graphCalls: { method: string; path: string; auth: string | null }[] = [];
+let graphServer: http.Server | null = null;
+/** A tiny JPEG (just the magic bytes plus padding) standing in for a photo a donor sends. */
+const E2E_JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(60, 1)]);
+const E2E_PDF = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(60, 32)]);
+
+/** Posts a Meta webhook signed exactly as Meta signs it. */
+async function postWebhook(payload: unknown) {
+  const raw = JSON.stringify(payload);
+  const signature = `sha256=${crypto.createHmac('sha256', process.env.WHATSAPP_APP_SECRET ?? '').update(raw).digest('hex')}`;
+  const response = await fetch(`${BASE}/webhooks/whatsapp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Hub-Signature-256': signature },
+    body: raw,
+  });
+  // Processing happens after the 200; give it a moment.
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  return response.status;
+}
+
+function inboundPayload(phoneNumberId: string, from: string, name: string, message: Record<string, unknown>) {
+  return {
+    entry: [
+      {
+        changes: [
+          {
+            value: {
+              metadata: { phone_number_id: phoneNumberId },
+              contacts: [{ wa_id: from, profile: { name } }],
+              messages: [{ from, id: `wamid.in.${Date.now()}.${Math.random()}`, ...message }],
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function startFakeGraph(): Promise<void> {
+  const routes: Record<string, (url: URL) => unknown> = {
+    'GET /v21.0/oauth/access_token': (url) =>
+      url.searchParams.get('grant_type') === 'fb_exchange_token'
+        ? { access_token: 'e2e-long-lived-token', expires_in: 60 * 86_400 }
+        : url.searchParams.get('code') === 'e2e-code'
+          ? { access_token: 'e2e-short-token' }
+          : { error: { code: 100, message: 'Invalid verification code' } },
+    'GET /v21.0/debug_token': () => ({
+      data: {
+        is_valid: true,
+        app_id: META_APP_ID,
+        expires_at: Math.floor(Date.now() / 1000) + 60 * 86_400,
+        granular_scopes: [
+          { scope: 'whatsapp_business_management', target_ids: ['111111111', '222222222'] },
+          // Only 111111111 may send; 222222222 is management-only and must be skipped.
+          { scope: 'whatsapp_business_messaging', target_ids: ['111111111'] },
+        ],
+      },
+    }),
+    'GET /v21.0/111111111': () => ({ name: 'E2E Ashram WABA' }),
+    'GET /v21.0/111111111/phone_numbers': () => ({
+      data: [
+        { id: '900000001', display_phone_number: '+91 98200 00001', verified_name: 'E2E Ashram', quality_rating: 'GREEN' },
+        { id: '900000002', display_phone_number: '+91 98200 00002', verified_name: 'E2E Ashram Office', quality_rating: 'YELLOW' },
+      ],
+    }),
+    'GET /v21.0/900000002': () => ({ display_phone_number: '+91 98200 00002', verified_name: 'E2E Ashram Office', quality_rating: 'YELLOW' }),
+    'POST /v21.0/111111111/subscribed_apps': () => ({ success: true }),
+    'GET /v21.0/900000001': () => ({ display_phone_number: '+91 98200 00001', verified_name: 'E2E Ashram', quality_rating: 'GREEN' }),
+    'POST /v21.0/900000001/messages': () => ({ messages: [{ id: `wamid.out.${graphCalls.length}` }] }),
+    'POST /v21.0/900000002/messages': () => ({ messages: [{ id: `wamid.out.${graphCalls.length}` }] }),
+    'POST /v21.0/900000001/media': () => ({ id: 'e2e-uploaded-media' }),
+    'GET /v21.0/e2e-inbound-photo': () => ({ url: `http://localhost:${GRAPH_PORT}/files/e2e-inbound-photo`, mime_type: 'image/jpeg', file_size: E2E_JPEG.length }),
+    'GET /files/e2e-inbound-photo': () => E2E_JPEG,
+  };
+  graphServer = http.createServer((req, res) => {
+    const url = new URL(req.url ?? '/', `http://localhost:${GRAPH_PORT}`);
+    graphCalls.push({ method: req.method ?? 'GET', path: url.pathname, auth: req.headers.authorization ?? null });
+    const handler = routes[`${req.method} ${url.pathname}`];
+    const body = handler ? handler(url) : { error: { code: 803, message: 'Unknown path' } };
+    if (Buffer.isBuffer(body)) {
+      res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+      res.end(body);
+      return;
+    }
+    res.writeHead(body && typeof body === 'object' && 'error' in body ? 400 : 200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(body));
+  });
+  return new Promise((resolve) => graphServer!.listen(GRAPH_PORT, resolve));
+}
+
+if (!EXTERNAL) {
+  process.env.WHATSAPP_GRAPH_URL = `http://localhost:${GRAPH_PORT}`;
+  process.env.WHATSAPP_GRAPH_VERSION = 'v21.0';
+  process.env.WHATSAPP_APP_ID = META_APP_ID;
+  process.env.WHATSAPP_APP_SECRET ||= 'e2e-app-secret';
+  process.env.API_PUBLIC_URL = `http://localhost:${TEST_PORT}`;
+  // Child processes (prisma, the seed and the API) inherit this, and an
+  // existing environment variable wins over the root .env file.
+  process.env.DATABASE_URL = testDatabaseUrl();
+  console.log(`  Using test database ${new URL(process.env.DATABASE_URL).pathname.slice(1)}`);
+}
+
 let passed = 0;
 let failed = 0;
 const failures: string[] = [];
@@ -30,6 +160,7 @@ let apiProcess: ChildProcess | null = null;
 
 function stopApi() {
   if (apiProcess && !apiProcess.killed) apiProcess.kill('SIGTERM');
+  graphServer?.close();
   apiProcess = null;
 }
 
@@ -150,6 +281,7 @@ async function main() {
 
   if (!EXTERNAL) {
     reseed();
+    await startFakeGraph();
     apiProcess = await startApi();
     console.log('');
   }
@@ -753,7 +885,8 @@ async function main() {
     phone: '098200 11999',
     email: 'e2e.donor@example.org',
     panNumber: 'abcde1234f',
-    city: 'Pune',
+    district: 'Pune',
+    village: 'Hadapsar',
     preferredLanguage: 'mr',
     tags: ['Annadan', 'E2E'],
     whatsappOptIn: true,
@@ -794,6 +927,66 @@ async function main() {
   const approverDonor = await call(approver, 'POST', '/donors', { name: 'Should Fail' });
   check('Approver cannot add donors (403)', approverDonor.status === 403, approverDonor.status);
 
+  const byPlace = (await call(accountant, 'GET', '/donors?state=&district=pune&village=Hadapsar')).data as any;
+  check('Donors filter by district and village', byPlace.data.length === 1 && byPlace.data[0].id === donorRecord.id, byPlace.meta);
+  const places = (await call(accountant, 'GET', '/donors/locations?district=Pune')).data as any;
+  check(
+    'Location options list districts and the villages within one',
+    places.data.districts.some((d: any) => d.value === 'Pune') && places.data.villages.some((v: any) => v.value === 'Hadapsar'),
+    places.data,
+  );
+
+  const withGift = await call(accountant, 'POST', '/donors', {
+    name: 'E2E Walk-in Donor',
+    state: 'Maharashtra',
+    district: 'Satara',
+    village: 'Wai',
+    donation: { date: new Date().toISOString().slice(0, 10), amount: 2_100, mode: 'CASH', fundId: gaushalaFund.id, is80GEligible: false },
+  });
+  const withGiftRecord = (withGift.data as any).data;
+  check('The donor form records a donation in the same save', withGift.status === 201 && /^DON-/.test(withGiftRecord?.donation?.receiptNumber ?? ''), withGift.data);
+  const withGiftProfile = (await call(accountant, 'GET', `/donors/${withGiftRecord?.id}`)).data as any;
+  check('That donation is linked to the new donor', withGiftProfile.stats?.totalDonated === 2_100, withGiftProfile.stats);
+
+  const badGift = await call(accountant, 'POST', '/donors', {
+    name: 'E2E Rolled Back Donor',
+    donation: { date: new Date().toISOString().slice(0, 10), amount: 500, mode: 'CASH', fundId: 'no-such-fund' },
+  });
+  const rolledBack = (await call(accountant, 'GET', '/donors?search=Rolled%20Back&status=all')).data as any;
+  check('A refused donation leaves no half-saved donor', badGift.status === 400 && rolledBack.meta.total === 0, { status: badGift.status, total: rolledBack.meta.total });
+
+  const withAadhaar = await call(accountant, 'POST', '/donors', { name: 'E2E Aadhaar Donor', aadhaarNumber: '2345 6789 0124' });
+  const aadhaarDonor = (withAadhaar.data as any).data;
+  check(
+    'Aadhaar is accepted and only ever returned masked',
+    withAadhaar.status === 201 && aadhaarDonor.aadhaarMasked === 'XXXX XXXX 0124' && !JSON.stringify(withAadhaar.data).includes('234567890124'),
+    withAadhaar.data,
+  );
+  const aadhaarList = (await call(accountant, 'GET', '/donors?search=E2E%20Aadhaar')).data as any;
+  const aadhaarProfile = (await call(accountant, 'GET', `/donors/${aadhaarDonor.id}`)).data as any;
+  check(
+    'Lists and profiles never contain the full Aadhaar number',
+    !JSON.stringify(aadhaarList).includes('234567890124') && !JSON.stringify(aadhaarProfile).includes('234567890124') && aadhaarProfile.aadhaarMasked === 'XXXX XXXX 0124',
+  );
+  const badAadhaar = await call(accountant, 'POST', '/donors', { name: 'E2E Bad Aadhaar', aadhaarNumber: '234567890125' });
+  check('An Aadhaar number with a wrong check digit is refused (422)', badAadhaar.status === 422, badAadhaar.status);
+  const keptAadhaar = ((await call(accountant, 'PUT', `/donors/${aadhaarDonor.id}`, { name: 'E2E Aadhaar Donor', city: undefined })).data as any).data;
+  const removedAadhaar = ((await call(accountant, 'PUT', `/donors/${aadhaarDonor.id}`, { name: 'E2E Aadhaar Donor', aadhaarNumber: '' })).data as any).data;
+  check(
+    'Saving without the field keeps Aadhaar; an empty value removes it',
+    keptAadhaar?.aadhaarMasked === 'XXXX XXXX 0124' && removedAadhaar?.aadhaarMasked === null,
+    { kept: keptAadhaar?.aadhaarMasked, removed: removedAadhaar?.aadhaarMasked },
+  );
+
+  const blocked = await call(admin, 'DELETE', `/donors/${withGiftRecord?.id}/permanent`);
+  check('A donor with donations cannot be deleted (409)', blocked.status === 409, blocked.status);
+  const disposable = ((await call(accountant, 'POST', '/donors', { name: 'E2E Disposable Donor' })).data as any).data;
+  const accountantDelete = await call(accountant, 'DELETE', `/donors/${disposable.id}/permanent`);
+  check('Only roles with donor.delete can delete donors (403)', accountantDelete.status === 403, accountantDelete.status);
+  const adminDelete = await call(admin, 'DELETE', `/donors/${disposable.id}/permanent`);
+  const gone = await call(admin, 'GET', `/donors/${disposable.id}`);
+  check('Admin can permanently delete a donor without donations', adminDelete.status === 204 && gone.status === 404, adminDelete.status);
+
   const mastersForApprover = (await call(approver, 'GET', '/masters')).data as any;
   const leakedPii = mastersForApprover.donors.some((d: any) => 'phone' in d || 'panNumber' in d || 'notes' in d);
   check('Dropdown masters never expose donor contact details or PAN', leakedPii === false);
@@ -823,6 +1016,185 @@ async function main() {
 
   const badCloud = await call(admin, 'PUT', '/whatsapp/cloud', { phoneNumberId: 'abc', businessAccountId: '1', accessToken: 'short' });
   check('Cloud API credentials are validated before any call to Meta (422)', badCloud.status === 422, badCloud.status);
+
+  if (!EXTERNAL) {
+    section('13d. WhatsApp — Connect with Facebook');
+
+    const start = await call(admin, 'GET', '/whatsapp/oauth/start');
+    const authUrl = new URL((start.data as any).authUrl ?? 'http://invalid/');
+    const state = authUrl.searchParams.get('state') ?? '';
+    check(
+      'Connect with Facebook sends the admin to Meta with WhatsApp scopes only',
+      start.status === 200 &&
+        authUrl.searchParams.get('client_id') === META_APP_ID &&
+        authUrl.searchParams.get('redirect_uri') === `http://localhost:${TEST_PORT}/api/whatsapp/oauth/callback` &&
+        (authUrl.searchParams.get('scope') ?? '').includes('whatsapp_business_messaging') &&
+        state.includes('.'),
+      start.data,
+    );
+    const accountantStart = await call(accountant, 'GET', '/whatsapp/oauth/start');
+    check('Only WhatsApp managers can start Connect with Facebook (403)', accountantStart.status === 403, accountantStart.status);
+
+    const callback = (query: string) =>
+      fetch(`${BASE}/whatsapp/oauth/callback?${query}`, { redirect: 'manual' }).then((response) => new URL(response.headers.get('location') ?? 'http://invalid/'));
+
+    const forged = await callback(`code=e2e-code&state=${encodeURIComponent(state.split('.')[0] + '.forged')}`);
+    check('A forged state is refused and nothing is stored', forged.searchParams.get('whatsapp_error') === 'WHATSAPP_OAUTH_EXPIRED', forged.href);
+
+    const denied = await callback(`error=access_denied&state=${encodeURIComponent(state)}`);
+    check('Declining on Facebook returns to settings with a reason', denied.pathname === '/settings/whatsapp' && denied.searchParams.get('whatsapp_error') === 'denied', denied.href);
+
+    const landed = await callback(`code=e2e-code&state=${encodeURIComponent(state)}`);
+    const pendingId = landed.searchParams.get('whatsapp_pending') ?? '';
+    check('The callback exchanges the code and asks which number to use', landed.pathname === '/settings/whatsapp' && Boolean(pendingId), landed.href);
+    check(
+      'The short-lived token is exchanged for a long-lived one',
+      graphCalls.filter((item) => item.path === '/v21.0/oauth/access_token').length >= 2,
+      graphCalls.map((item) => item.path),
+    );
+
+    const pending = await call(admin, 'GET', `/whatsapp/oauth/pending/${pendingId}`);
+    const accounts = (pending.data as any).data?.businessAccounts ?? [];
+    check(
+      'Only accounts with messaging permission are offered, with their numbers',
+      pending.status === 200 && accounts.length === 1 && accounts[0].id === '111111111' && accounts[0].phoneNumbers.length === 2,
+      pending.data,
+    );
+    check('The pending choice never exposes the token', !JSON.stringify(pending.data).includes('e2e-long-lived-token'));
+
+    const crossPending = await call(otherOrg, 'GET', `/whatsapp/oauth/pending/${pendingId}`);
+    check('Another organization cannot read or use the pending choice', crossPending.status === 409, crossPending.status);
+
+    const wrongNumber = await call(admin, 'POST', '/whatsapp/oauth/complete', {
+      pendingId,
+      numbers: [
+        { businessAccountId: '111111111', phoneNumberId: '900000001' },
+        { businessAccountId: '222222222', phoneNumberId: '900000009' },
+      ],
+    });
+    const nothingConnected = ((await call(admin, 'GET', '/whatsapp/numbers')).data as any).data;
+    check(
+      'Only numbers Meta listed can be chosen, and a bad pick connects nothing',
+      wrongNumber.status === 409 && nothingConnected.length === 0,
+      { status: wrongNumber.status, connected: nothingConnected.length },
+    );
+
+    const completed = await call(admin, 'POST', '/whatsapp/oauth/complete', {
+      pendingId,
+      numbers: [
+        { businessAccountId: '111111111', phoneNumberId: '900000001' },
+        { businessAccountId: '111111111', phoneNumberId: '900000002' },
+      ],
+    });
+    const cloudAfter = (completed.data as any).cloud ?? {};
+    const office = (cloudAfter.numbers ?? []).find((item: any) => item.phoneNumberId === '900000002');
+    check(
+      'Several numbers can be connected through Facebook in one go',
+      completed.status === 200 &&
+        cloudAfter.status === 'CONNECTED' &&
+        cloudAfter.numbers?.length === 2 &&
+        cloudAfter.connectMethod === 'OAUTH' &&
+        office?.displayNumber === '+91 98200 00002' &&
+        office?.qualityRating === 'YELLOW',
+      completed.data,
+    );
+    check('Numbers are listed without their tokens', !JSON.stringify(cloudAfter).includes('e2e-long-lived-token'));
+    check('Token expiry is tracked for the reconnect reminder', Boolean(cloudAfter.accessExpiresAt), cloudAfter.accessExpiresAt);
+    const subscribed = graphCalls.find((item) => item.method === 'POST' && item.path === '/v21.0/111111111/subscribed_apps');
+    check(
+      'The business account is subscribed to the webhook with the new token',
+      cloudAfter.webhookSubscribed === true && subscribed?.auth === 'Bearer e2e-long-lived-token',
+      subscribed,
+    );
+    const reused = await call(admin, 'GET', `/whatsapp/oauth/pending/${pendingId}`);
+    check('A pending choice can be used only once', reused.status === 409, reused.status);
+
+    section('13e. WhatsApp inbox');
+
+    // An unknown person sends a photo to the office number; a donor writes to the main number.
+    const strangerPhone = '919876512345';
+    const donorPhone = '919820011999';
+    const photoStatus = await postWebhook(
+      inboundPayload('900000002', strangerPhone, 'Ramesh Kale', { type: 'image', image: { id: 'e2e-inbound-photo', mime_type: 'image/jpeg', caption: 'Seva photo' } }),
+    );
+    await postWebhook(inboundPayload('900000001', donorPhone, 'E2E Donor', { type: 'text', text: { body: 'Namaskar, receipt please' } }));
+    check('Signed inbound webhooks are accepted', photoStatus === 200, photoStatus);
+
+    const inbox = (await call(admin, 'GET', '/whatsapp/conversations')).data as any;
+    const stranger = inbox.data?.find((item: any) => item.phone === strangerPhone);
+    const donorThread = inbox.data?.find((item: any) => item.phone === donorPhone);
+    check(
+      'Incoming messages open conversations, newest first, with unread counts',
+      inbox.data?.[0]?.phone === donorPhone && stranger?.unreadCount === 1 && donorThread?.unreadCount === 1,
+      inbox.data?.map((item: any) => [item.phone, item.unreadCount]),
+    );
+    check(
+      'An unknown sender shows their WhatsApp name; a known number is matched to the donor',
+      stranger?.donor === null && stranger?.contactName === 'Ramesh Kale' && donorThread?.donor?.id === donorRecord.id,
+      { stranger, donor: donorThread?.donor },
+    );
+    check('The reply window is open after they write', stranger?.windowOpen === true && Boolean(stranger?.windowExpiresAt));
+
+    const unknownOnly = (await call(admin, 'GET', '/whatsapp/conversations?filter=unknown')).data as any;
+    check('The inbox filters unknown contacts', unknownOnly.data?.every((item: any) => item.donor === null) && unknownOnly.data?.length >= 1);
+
+    const badge = (await call(admin, 'GET', '/whatsapp/conversations/unread-count')).data as any;
+    check('The unread badge counts unseen messages', badge.count >= 2, badge);
+
+    const thread = (await call(admin, 'GET', `/whatsapp/conversations/${strangerPhone}/messages`)).data as any;
+    const photo = thread.data?.[0];
+    check('Inbound photos are downloaded from Meta into storage', photo?.mediaType === 'image' && photo?.hasMedia === true && photo?.body === 'Seva photo', photo);
+    const photoFile = await fetch(`${BASE}/whatsapp/messages/${photo?.id}/media`, { headers: { Authorization: `Bearer ${admin.token}` } });
+    const photoBytes = Buffer.from(await photoFile.arrayBuffer());
+    check('The photo is served to staff from our own storage', photoFile.status === 200 && photoBytes.equals(E2E_JPEG), photoFile.status);
+    const crossPhoto = await fetch(`${BASE}/whatsapp/messages/${photo?.id}/media`, { headers: { Authorization: `Bearer ${otherOrg.token}` } });
+    check('Another organization cannot fetch the photo', crossPhoto.status === 404, crossPhoto.status);
+
+    const accountantInbox = await call(accountant, 'GET', '/whatsapp/conversations');
+    check('The inbox needs the WhatsApp inbox permission (403)', accountantInbox.status === 403, accountantInbox.status);
+
+    const reply = await call(admin, 'POST', `/whatsapp/conversations/${strangerPhone}/messages`, { body: 'Thank you {{name}}' });
+    const replied = (reply.data as any).data;
+    const replyCall = graphCalls.filter((item) => item.method === 'POST' && item.path.endsWith('/messages')).at(-1);
+    check(
+      'A reply goes out from the number they wrote to, personalised with their name',
+      reply.status === 201 && replied?.status === 'SENT' && replied?.body === 'Thank you Ramesh Kale' && replyCall?.path === '/v21.0/900000002/messages',
+      { status: reply.status, body: replied?.body, path: replyCall?.path },
+    );
+
+    const pdf = new FormData();
+    pdf.append('file', new Blob([E2E_PDF], { type: 'application/pdf' }), 'receipt.pdf');
+    pdf.append('caption', 'Your receipt');
+    const sentPdf = await fetch(`${BASE}/whatsapp/conversations/${donorPhone}/media`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${admin.token}` },
+      body: pdf,
+    });
+    const sentPdfBody = (await sentPdf.json()) as any;
+    check('A PDF can be sent in the conversation', sentPdf.status === 201 && sentPdfBody.data?.mediaType === 'document', sentPdfBody);
+
+    const seen = (await call(admin, 'POST', `/whatsapp/conversations/${strangerPhone}/seen`)).data as any;
+    const afterSeen = ((await call(admin, 'GET', '/whatsapp/conversations?filter=unread')).data as any).data;
+    check('Opening a conversation marks it read', seen.updated === 1 && !afterSeen.some((item: any) => item.phone === strangerPhone), seen);
+
+    const coldContact = await call(admin, 'POST', '/whatsapp/conversations/919000000001/messages', { body: 'Hello' });
+    check('Nobody can be messaged cold from the inbox', coldContact.status === 404 || coldContact.status === 409, coldContact.status);
+
+    const saved = await call(admin, 'POST', '/donors', { name: 'Ramesh Kale', whatsappNumber: '+91 98765 12345', whatsappOptIn: true });
+    const savedDonor = (saved.data as any).data;
+    const linked = (await call(admin, 'GET', `/whatsapp/conversations/${strangerPhone}`)).data as any;
+    check('Saving the contact as a donor attaches the conversation', linked.data?.donor?.id === savedDonor?.id, linked.data?.donor);
+
+    const disconnectOne = await call(admin, 'DELETE', `/whatsapp/numbers/${office?.id}`);
+    check(
+      'A single number can be disconnected, leaving the other',
+      disconnectOne.status === 200 && (disconnectOne.data as any).cloud.numbers.length === 1,
+      disconnectOne.status,
+    );
+
+    const disconnectAfter = await call(admin, 'DELETE', '/whatsapp/cloud');
+    check('The Facebook connection can be disconnected', disconnectAfter.status === 200 && (disconnectAfter.data as any).cloud.status === 'DISCONNECTED', disconnectAfter.status);
+  }
 
   const notConnected = await call(accountant, 'POST', '/whatsapp/send', { donorId: donorRecord.id, body: 'Namaskar {{name}}' });
   check(

@@ -17,7 +17,7 @@ export function MobileDrawer({ open, onOpenChange }: { open: boolean; onOpenChan
       <SheetContent side="left" width="max-w-[262px]" className="bg-sidebar text-ink">
         <SheetTitle className="sr-only">{t('nav.navigation')}</SheetTitle>
         <div className="border-b border-line px-4 py-4 pr-12">
-          <Brand tone="dark" />
+          <Brand />
         </div>
         <SidebarNav onNavigate={() => onOpenChange(false)} />
         <div className="space-y-2.5 border-t border-line px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Database, Download, FileUp, Loader2, ShieldAlert } from 'lucide-react';
+import { DonorImportDialog } from '@/features/donors/DonorImportDialog';
 import { toast } from 'sonner';
 import { api, downloadFile } from '@/lib/api/client';
 import { queryKeys } from '@/lib/api/queryClient';
@@ -21,6 +22,7 @@ export default function DataToolsPage() {
   const { t } = useTranslation();
   const { can } = useAuth();
   const [exporting, setExporting] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const { data } = useQuery({
     queryKey: queryKeys.settings,
@@ -77,25 +79,24 @@ export default function DataToolsPage() {
         <SectionCard title={t('dataTools.importTitle')} description={t('dataTools.importText')}>
           <div className="rounded-control border-2 border-dashed border-line bg-canvas/40 p-6 text-center">
             <FileUp className="mx-auto h-6 w-6 text-ink-muted" aria-hidden="true" />
-            <p className="mt-2.5 text-[13px] font-medium text-ink">{t('dataTools.importHandled')}</p>
-            <p className="mx-auto mt-1 max-w-sm text-[12px] leading-relaxed text-ink-muted">
-              {t('dataTools.importExplain')}
-            </p>
-            <Button
-              variant="outline"
-              size="sm"
-              className="mt-4"
-              onClick={() =>
-                toast.info(t('dataTools.importRequest'), {
-                  description: t('dataTools.importRequestText'),
-                })
-              }
-            >
-              {t('dataTools.requestImport')}
-            </Button>
+            <p className="mt-2.5 text-[13px] font-medium text-ink">{t('donorImport.cardTitle')}</p>
+            <p className="mx-auto mt-1 max-w-sm text-[12px] leading-relaxed text-ink-muted">{t('donorImport.cardText')}</p>
+            {can('donor.manage') ? (
+              <Button size="sm" className="mt-4" onClick={() => setImportOpen(true)}>
+                <FileUp className="h-3.5 w-3.5" aria-hidden="true" />
+                {t('donorImport.open')}
+              </Button>
+            ) : (
+              <p className="mt-4 flex items-center justify-center gap-2 text-[12.5px] text-ink-muted">
+                <ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" />
+                {t('donorImport.needPermission')}
+              </p>
+            )}
           </div>
         </SectionCard>
       </div>
+
+      <DonorImportDialog open={importOpen} onOpenChange={setImportOpen} />
     </>
   );
 }

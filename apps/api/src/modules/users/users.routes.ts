@@ -4,10 +4,32 @@ import { z } from 'zod';
 import { PERMISSIONS } from '@ashram/types';
 import { prisma } from '../../db';
 import { asyncHandler, paginated } from '../../lib/http';
-import { badRequest, conflict, notFound } from '../../lib/errors';
+import { badRequest, conflict, forbidden, notFound } from '../../lib/errors';
 import { AUDIT_ACTIONS, recordAudit } from '../../lib/audit';
 import { validate, validated } from '../../middleware/validate';
-import { getCurrentOrganization, getCurrentUser, requirePermission } from '../../middleware/auth';
+import { getCurrentOrganization, getCurrentUser, requirePermission, type AuthContext } from '../../middleware/auth';
+
+/**
+ * Nobody can hand out, or take over, more access than they hold themselves.
+ * Without this, anyone with `user.edit` could promote themselves to Admin, or
+ * reset an Admin's password and sign in as them.
+ */
+async function assertWithinOwnAccess(auth: AuthContext, roleId: string, action: 'assign' | 'manage') {
+  const role = await prisma.role.findFirst({
+    where: { id: roleId, organizationId: auth.organizationId },
+    include: { permissions: { include: { permission: true } } },
+  });
+  if (!role) throw badRequest('Selected role is not available in this organization');
+  const exceeds = role.permissions.some((rp) => !auth.permissions.has(rp.permission.key));
+  if (exceeds) {
+    throw forbidden(
+      action === 'assign'
+        ? 'You cannot assign a role with permissions you do not have yourself'
+        : 'You cannot change a user whose role has permissions you do not have yourself',
+    );
+  }
+  return role;
+}
 
 export const usersRouter = Router();
 export const rolesRouter = Router();
@@ -124,8 +146,7 @@ usersRouter.post(
     const auth = getCurrentUser(req);
     const body = req.body as z.infer<typeof createUserSchema>;
 
-    const role = await prisma.role.findFirst({ where: { id: body.roleId, organizationId: auth.organizationId } });
-    if (!role) throw badRequest('Selected role is not available in this organization');
+    const role = await assertWithinOwnAccess(auth, body.roleId, 'assign');
 
     const existing = await prisma.user.findFirst({
       where: { organizationId: auth.organizationId, email: body.email },
@@ -183,10 +204,8 @@ usersRouter.put(
     });
     if (!existing) throw notFound('User not found');
 
-    if (body.roleId) {
-      const role = await prisma.role.findFirst({ where: { id: body.roleId, organizationId: auth.organizationId } });
-      if (!role) throw badRequest('Selected role is not available in this organization');
-    }
+    await assertWithinOwnAccess(auth, existing.roleId, 'manage');
+    if (body.roleId) await assertWithinOwnAccess(auth, body.roleId, 'assign');
 
     // Guard against locking the organization out of its own admin role.
     if (existing.id === auth.userId && body.isActive === false) {
@@ -215,6 +234,16 @@ usersRouter.put(
       },
     });
 
+    // A password reset, role change or deactivation must take effect now, not
+    // when the user's existing sessions happen to expire. The caller's own
+    // current session survives so editing yourself doesn't sign you out.
+    if (body.password || body.roleId || body.isActive === false) {
+      await prisma.session.updateMany({
+        where: { userId: existing.id, revokedAt: null, id: { not: auth.sessionId } },
+        data: { revokedAt: new Date() },
+      });
+    }
+
     await recordAudit({
       organizationId: auth.organizationId,
       userId: auth.userId,
@@ -242,6 +271,7 @@ usersRouter.delete(
       where: { id: req.params.id, organizationId: auth.organizationId },
     });
     if (!existing) throw notFound('User not found');
+    await assertWithinOwnAccess(auth, existing.roleId, 'manage');
 
     // Users are deactivated rather than deleted so history stays attributable.
     await prisma.user.update({ where: { id: existing.id }, data: { isActive: false } });

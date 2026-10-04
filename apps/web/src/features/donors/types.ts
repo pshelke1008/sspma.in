@@ -11,10 +11,14 @@ export interface Donor {
   whatsappNumber: string | null;
   alternatePhone: string | null;
   panNumber: string | null;
+  /** "XXXX XXXX 1234" — the full number never leaves the server. */
+  aadhaarMasked: string | null;
   addressLine1: string | null;
   addressLine2: string | null;
-  city: string | null;
   state: string | null;
+  district: string | null;
+  /** Gaon. */
+  village: string | null;
   postalCode: string | null;
   country: string;
   dateOfBirth: string | null;

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
+import type { ColumnDef } from '@tanstack/react-table';
 import { useFieldArray, useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -17,17 +18,24 @@ import { useAuth } from '@/lib/auth/AuthProvider';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { SectionCard } from '@/components/common/SectionCard';
 import { FilterBar, FilterField } from '@/components/common/FilterBar';
-import { EmptyState, ErrorState, TableSkeleton } from '@/components/common/states';
+import { EmptyState } from '@/components/common/states';
 import { PurchaseStatusBadge } from '@/components/common/StatusBadge';
-import { TablePagination } from '@/components/common/DataTable';
+import { DataTable } from '@/components/common/DataTable';
+import { ExportMenu } from '@/components/common/ExportMenu';
+import { fetchAllPages, type ExportColumn } from '@/lib/export';
 import { FormField, DateInput, MoneyInput } from '@/components/common/forms';
 import { Button } from '@/components/ui/button';
 import { Input, Textarea } from '@/components/ui/input';
 import { SimpleSelect } from '@/components/ui/select';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
-import { formatCurrency, formatDate } from '@/lib/utils/format';
+import { formatCurrency, formatDate, todayLocal } from '@/lib/utils/format';
 import { computeTotals } from '@/features/expenses/expenseSchema';
+
+interface PurchaseListResponse {
+  data: PurchaseRow[];
+  meta: { page: number; pageSize: number; total: number; totalPages: number; totalAmount: number };
+}
 
 interface PurchaseRow {
   id: string;
@@ -57,7 +65,6 @@ export default function PurchasesPage() {
   const labels = useLabels();
   const [searchParams, setSearchParams] = useSearchParams();
   const { can } = useAuth();
-  const { data: masters } = useMasters();
   const [dialogOpen, setDialogOpen] = useState(searchParams.get('new') === '1');
 
   useEffect(() => {
@@ -76,17 +83,14 @@ export default function PurchasesPage() {
     setSearchParams(next, { replace: true });
   }
 
-  const params = useMemo(
-    () => ({ page, pageSize: 20, search: search || undefined, status: status || undefined }),
-    [page, search, status],
-  );
+  const clearFilters = () => setSearchParams(new URLSearchParams(), { replace: true });
+
+  const filters = useMemo(() => ({ search: search || undefined, status: status || undefined }), [search, status]);
+  const params = useMemo(() => ({ page, pageSize: 20, ...filters }), [page, filters]);
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: queryKeys.purchases(params),
-    queryFn: () =>
-      api.get<{ data: PurchaseRow[]; meta: { page: number; pageSize: number; total: number; totalPages: number; totalAmount: number } }>(
-        '/purchases' + buildQuery(params),
-      ),
+    queryFn: () => api.get<PurchaseListResponse>('/purchases' + buildQuery(params)),
     placeholderData: (previous) => previous,
   });
 
@@ -99,7 +103,89 @@ export default function PurchasesPage() {
     onError: (err) => toast.error(t('purchases.updateFailed'), { description: errorMessage(t, err) }),
   });
 
-  if (error) return <ErrorState message={errorMessage(t, error)} onRetry={() => void refetch()} />;
+  const canAdvance = (row: PurchaseRow) => can('purchase.create') && (NEXT_STATUS[row.status]?.length ?? 0) > 0;
+
+  const columns: ColumnDef<PurchaseRow>[] = [
+    {
+      id: 'orderNumber',
+      header: t('purchases.orderNumber'),
+      enableHiding: false,
+      cell: ({ row }) => <span className="font-medium text-ink">{row.original.orderNumber}</span>,
+    },
+    {
+      id: 'date',
+      header: t('common.date'),
+      cell: ({ row }) => <span className="whitespace-nowrap text-ink-muted">{formatDate(row.original.date)}</span>,
+    },
+    { id: 'supplier', header: t('common.supplier'), cell: ({ row }) => row.original.supplier.name },
+    {
+      id: 'department',
+      header: t('common.department'),
+      cell: ({ row }) => <span className="text-ink-muted">{row.original.department.name}</span>,
+    },
+    {
+      id: 'items',
+      header: t('purchases.items'),
+      cell: ({ row }) => <span className="text-ink-muted tnum">{row.original._count.items}</span>,
+    },
+    { id: 'status', header: t('common.status'), cell: ({ row }) => <PurchaseStatusBadge status={row.original.status} /> },
+    {
+      id: 'total',
+      header: t('common.total'),
+      enableHiding: false,
+      meta: { align: 'right' },
+      cell: ({ row }) => <span className="font-semibold text-ink">{formatCurrency(row.original.total)}</span>,
+    },
+    {
+      id: 'actions',
+      header: '',
+      enableHiding: false,
+      meta: { align: 'right' },
+      cell: ({ row: { original: row } }) =>
+        canAdvance(row) && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-sm" aria-label={t('purchases.actionsFor', { number: row.orderNumber })}>
+                <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              {NEXT_STATUS[row.status].map((next) => (
+                <DropdownMenuItem
+                  key={next}
+                  tone={next === 'CANCELLED' ? 'danger' : 'default'}
+                  onSelect={() => statusMutation.mutate({ id: row.id, next })}
+                >
+                  {t('purchases.markAs', { status: labels.purchaseStatus[next] })}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ),
+    },
+  ];
+
+  const exportColumns: ExportColumn<PurchaseRow>[] = [
+    { header: t('purchases.orderNumber'), value: (row) => row.orderNumber },
+    { header: t('common.date'), type: 'date', value: (row) => row.date },
+    { header: t('purchases.expectedDelivery'), type: 'date', value: (row) => row.expectedDate },
+    { header: t('common.supplier'), value: (row) => row.supplier.name },
+    { header: t('common.department'), value: (row) => row.department.name },
+    { header: t('common.fund'), value: (row) => row.fund.name },
+    { header: t('purchases.items'), type: 'number', value: (row) => row._count.items },
+    { header: t('common.subtotal'), type: 'currency', value: (row) => row.subtotal },
+    { header: t('common.tax'), type: 'currency', value: (row) => row.tax },
+    { header: t('common.total'), type: 'currency', value: (row) => row.total },
+    { header: t('common.status'), value: (row) => labels.purchaseStatus[row.status] ?? row.status },
+  ];
+
+  const createButton = (size?: 'sm') =>
+    can('purchase.create') && (
+      <Button size={size} onClick={() => setDialogOpen(true)}>
+        <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+        {t('purchases.create')}
+      </Button>
+    );
 
   return (
     <>
@@ -107,12 +193,19 @@ export default function PurchasesPage() {
         title={t('purchases.title')}
         subtitle={t('purchases.subtitle')}
         actions={
-          can('purchase.create') && (
-            <Button onClick={() => setDialogOpen(true)}>
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-              {t('purchases.create')}
-            </Button>
-          )
+          <div className="flex flex-wrap items-center gap-2">
+            <ExportMenu
+              fileBase="purchases"
+              title={t('purchases.title')}
+              columns={exportColumns}
+              fetchRows={() =>
+                fetchAllPages((pageNumber, pageSize) =>
+                  api.get<PurchaseListResponse>('/purchases' + buildQuery({ ...filters, page: pageNumber, pageSize })),
+                )
+              }
+            />
+            {createButton()}
+          </div>
         }
       />
 
@@ -123,7 +216,7 @@ export default function PurchasesPage() {
             onSearchChange={(value) => setParam('search', value)}
             searchPlaceholder={t('purchases.searchPlaceholder')}
             activeCount={status ? 1 : 0}
-            onClear={() => setSearchParams(new URLSearchParams(), { replace: true })}
+            onClear={clearFilters}
             filters={
               <FilterField label={t('common.status')}>
                 <SimpleSelect
@@ -140,124 +233,70 @@ export default function PurchasesPage() {
           />
         </div>
 
-        {isLoading ? (
-          <TableSkeleton columns={6} />
-        ) : !data?.data.length ? (
-          <EmptyState
-            icon={ShoppingCart}
-            title={t('purchases.emptyTitle')}
-            description={t('purchases.emptyText')}
-            action={
-              can('purchase.create') && (
-                <Button size="sm" onClick={() => setDialogOpen(true)}>
-                  <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                  {t('purchases.create')}
-                </Button>
-              )
-            }
-          />
-        ) : (
-          <>
-            <div className="hidden overflow-x-auto md:block">
-              <table className="w-full min-w-[760px] border-collapse">
-                <thead>
-                  <tr className="border-b border-line bg-canvas/60">
-                    {[t('purchases.orderNumber'), t('common.date'), t('common.supplier'), t('common.department'), t('purchases.items'), t('common.status'), t('common.total'), ''].map((heading, index) => (
-                      <th
-                        key={heading || index}
-                        scope="col"
-                        className={`px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-ink-muted ${index === 6 ? 'text-right' : 'text-left'}`}
-                      >
-                        {heading}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-line">
-                  {data.data.map((row) => (
-                    <tr key={row.id} className="transition-colors hover:bg-canvas/60">
-                      <td className="px-3 py-2.5 text-[12.5px] font-medium text-ink">{row.orderNumber}</td>
-                      <td className="whitespace-nowrap px-3 py-2.5 text-[12.5px] text-ink-muted">{formatDate(row.date)}</td>
-                      <td className="px-3 py-2.5 text-[12.5px] text-ink">{row.supplier.name}</td>
-                      <td className="px-3 py-2.5 text-[12.5px] text-ink-muted">{row.department.name}</td>
-                      <td className="px-3 py-2.5 text-[12.5px] text-ink-muted tnum">{row._count.items}</td>
-                      <td className="px-3 py-2.5"><PurchaseStatusBadge status={row.status} /></td>
-                      <td className="px-3 py-2.5 text-right text-[12.5px] font-semibold text-ink tnum">
-                        {formatCurrency(row.total)}
-                      </td>
-                      <td className="px-3 py-2.5 text-right">
-                        {can('purchase.create') && NEXT_STATUS[row.status]?.length > 0 && (
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon-sm" aria-label={t('purchases.actionsFor', { number: row.orderNumber })}>
-                                <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent>
-                              {NEXT_STATUS[row.status].map((next) => (
-                                <DropdownMenuItem
-                                  key={next}
-                                  tone={next === 'CANCELLED' ? 'danger' : 'default'}
-                                  onSelect={() => statusMutation.mutate({ id: row.id, next })}
-                                >
-                                  {t('purchases.markAs', { status: labels.purchaseStatus[next] })}
-                                </DropdownMenuItem>
-                              ))}
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        )}
-                      </td>
-                    </tr>
+        <DataTable
+          columns={columns}
+          data={data?.data ?? []}
+          isLoading={isLoading}
+          error={error as Error | null}
+          onRetry={() => void refetch()}
+          onClearFilters={clearFilters}
+          getRowId={(row) => row.id}
+          tableClassName="min-w-[760px]"
+          emptyState={
+            search || status ? undefined : (
+              <EmptyState
+                icon={ShoppingCart}
+                title={t('purchases.emptyTitle')}
+                description={t('purchases.emptyText')}
+                action={createButton('sm')}
+              />
+            )
+          }
+          mobileCard={(row) => (
+            <div className="px-4 py-3">
+              <div className="flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13px] font-medium text-ink">{row.supplier.name}</p>
+                  <p className="mt-0.5 truncate text-[11.5px] text-ink-muted">
+                    {row.orderNumber} · {row.department.name}
+                  </p>
+                  <p className="mt-0.5 text-[11.5px] text-ink-muted">
+                    {formatDate(row.date)} · {t('purchases.itemCount', { count: row._count.items })}
+                  </p>
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-1.5">
+                  <span className="text-[13px] font-semibold text-ink tnum">{formatCurrency(row.total)}</span>
+                  <PurchaseStatusBadge status={row.status} />
+                </div>
+              </div>
+              {canAdvance(row) && (
+                <div className="mt-2.5 flex flex-wrap gap-2">
+                  {NEXT_STATUS[row.status].map((next) => (
+                    <Button
+                      key={next}
+                      size="sm"
+                      variant={next === 'CANCELLED' ? 'danger-outline' : 'outline'}
+                      onClick={() => statusMutation.mutate({ id: row.id, next })}
+                    >
+                      {labels.purchaseStatus[next]}
+                    </Button>
                   ))}
-                </tbody>
-              </table>
+                </div>
+              )}
             </div>
-
-            <ul className="divide-y divide-line md:hidden">
-              {data.data.map((row) => (
-                <li key={row.id} className="px-4 py-3">
-                  <div className="flex items-start gap-3">
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-[13px] font-medium text-ink">{row.supplier.name}</p>
-                      <p className="mt-0.5 truncate text-[11.5px] text-ink-muted">
-                        {row.orderNumber} · {row.department.name}
-                      </p>
-                      <p className="mt-0.5 text-[11.5px] text-ink-muted">
-                        {formatDate(row.date)} · {t('purchases.itemCount', { count: row._count.items })}
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 flex-col items-end gap-1.5">
-                      <span className="text-[13px] font-semibold text-ink tnum">{formatCurrency(row.total)}</span>
-                      <PurchaseStatusBadge status={row.status} />
-                    </div>
-                  </div>
-                  {can('purchase.create') && NEXT_STATUS[row.status]?.length > 0 && (
-                    <div className="mt-2.5 flex flex-wrap gap-2">
-                      {NEXT_STATUS[row.status].map((next) => (
-                        <Button
-                          key={next}
-                          size="sm"
-                          variant={next === 'CANCELLED' ? 'danger-outline' : 'outline'}
-                          onClick={() => statusMutation.mutate({ id: row.id, next })}
-                        >
-                          {labels.purchaseStatus[next]}
-                        </Button>
-                      ))}
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-
-            <TablePagination
-              page={data.meta.page}
-              pageSize={data.meta.pageSize}
-              total={data.meta.total}
-              totalPages={data.meta.totalPages}
-              onPageChange={(value) => setParam('page', String(value))}
-            />
-          </>
-        )}
+          )}
+          pagination={
+            data
+              ? {
+                  page: data.meta.page,
+                  pageSize: data.meta.pageSize,
+                  total: data.meta.total,
+                  totalPages: data.meta.totalPages,
+                  onPageChange: (value) => setParam('page', String(value)),
+                }
+              : undefined
+          }
+        />
       </SectionCard>
 
       <PurchaseDialog
@@ -314,7 +353,7 @@ function PurchaseDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
   } = useForm<PurchaseValues>({
     resolver: zodResolver(schema),
     defaultValues: {
-      date: new Date().toISOString().slice(0, 10),
+      date: todayLocal(),
       supplierId: '',
       departmentId: '',
       fundId: '',

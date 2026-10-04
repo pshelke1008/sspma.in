@@ -12,6 +12,7 @@ import { Input, Textarea } from '@/components/ui/input';
 import { SimpleSelect } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import type { ExpenseFormValues } from '../expenseSchema';
+import { todayLocal } from '@/lib/utils/format';
 
 interface UserOption {
   id: string;
@@ -73,7 +74,7 @@ export function StepBasicInfo({ onAddSupplier }: { onAddSupplier: () => void }) 
       )}
 
       <FormField label={t('wizard.expenseDate')} htmlFor="date" required error={errors.date?.message}>
-        <DateInput id="date" max={new Date().toISOString().slice(0, 10)} invalid={Boolean(errors.date)} {...register('date')} />
+        <DateInput id="date" max={todayLocal()} invalid={Boolean(errors.date)} {...register('date')} />
       </FormField>
 
       <FormField

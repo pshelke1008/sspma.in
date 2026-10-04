@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
+import type { ColumnDef } from '@tanstack/react-table';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -15,16 +16,21 @@ import { StatCard } from '@/components/common/StatCard';
 import { SectionCard } from '@/components/common/SectionCard';
 import { CardGridSkeleton, ChartSkeleton, EmptyState, ErrorState } from '@/components/common/states';
 import { StatusBadge } from '@/components/common/StatusBadge';
+import { DataTable } from '@/components/common/DataTable';
+import { ExportMenu } from '@/components/common/ExportMenu';
+import type { ExportColumn } from '@/lib/export';
 import { FormField, DateInput, MoneyInput } from '@/components/common/forms';
 import { Button } from '@/components/ui/button';
 import { Input, Textarea } from '@/components/ui/input';
 import { SimpleSelect } from '@/components/ui/select';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { BarChart, DonutChart } from '@/components/charts';
-import { currentFinancialYear, financialYearOptions, formatCurrency, formatDate, monthOptions } from '@/lib/utils/format';
+import { currentFinancialYear, financialYearOptions, formatCurrency, formatDate, monthOptions, todayLocal } from '@/lib/utils/format';
 import { useTranslation } from 'react-i18next';
 import { errorMessage } from '@/i18n/errors';
 import { useLabels } from '@/i18n/useLabels';
+
+type FinanceTransaction = FinanceData['transactions'][number];
 
 interface FinanceData {
   period: { financialYear: string; month: string; start: string; end: string };
@@ -53,6 +59,7 @@ export default function FinancePage() {
   const [month, setMonth] = useState('all');
   const [incomeOpen, setIncomeOpen] = useState(searchParams.get('income') === '1');
   const { can } = useAuth();
+  const labels = useLabels();
 
   useEffect(() => {
     if (searchParams.get('income') === '1') setIncomeOpen(true);
@@ -76,6 +83,72 @@ export default function FinancePage() {
       toast.error(t('finance.exportFailed'), { description: errorMessage(t, err) });
     }
   }
+
+  const transactionColumns: ColumnDef<FinanceTransaction>[] = [
+    {
+      id: 'date',
+      header: t('common.date'),
+      cell: ({ row }) => <span className="whitespace-nowrap text-ink-muted">{formatDate(row.original.date)}</span>,
+    },
+    {
+      id: 'particulars',
+      header: t('finance.particulars'),
+      cell: ({ row }) => (
+        <Link to={row.original.link} className="font-medium text-ink hover:text-brand hover:underline">
+          {row.original.particulars}
+        </Link>
+      ),
+    },
+    {
+      id: 'reference',
+      header: t('common.reference'),
+      cell: ({ row }) => <span className="text-[12px] text-ink-muted">{row.original.reference}</span>,
+    },
+    {
+      id: 'amount',
+      header: t('common.amount'),
+      meta: { align: 'right' },
+      cell: ({ row: { original: transaction } }) => (
+        <span
+          className={`inline-flex items-center gap-1 font-semibold tnum ${
+            transaction.direction === 'IN' ? 'text-success' : 'text-ink'
+          }`}
+        >
+          {transaction.direction === 'IN' ? (
+            <ArrowUpRight className="h-3 w-3" aria-hidden="true" />
+          ) : (
+            <ArrowDownRight className="h-3 w-3 text-accent" aria-hidden="true" />
+          )}
+          {formatCurrency(transaction.amount)}
+        </span>
+      ),
+    },
+    {
+      id: 'status',
+      header: t('common.status'),
+      cell: ({ row }) =>
+        row.original.direction === 'IN' ? (
+          <span className="text-[12px] text-success">{t('finance.received')}</span>
+        ) : (
+          <StatusBadge status={row.original.status} />
+        ),
+    },
+  ];
+
+  const transactionExportColumns: ExportColumn<FinanceTransaction>[] = [
+    { header: t('common.date'), type: 'date', value: (row) => row.date },
+    { header: t('finance.particulars'), value: (row) => row.particulars },
+    { header: t('common.reference'), value: (row) => row.reference },
+    {
+      header: t('dataExport.cols.direction'),
+      value: (row) => (row.direction === 'IN' ? t('dataExport.cols.moneyIn') : t('dataExport.cols.moneyOut')),
+    },
+    { header: t('common.amount'), type: 'currency', value: (row) => row.amount },
+    {
+      header: t('common.status'),
+      value: (row) => (row.direction === 'IN' ? t('finance.received') : (labels.expenseStatus[row.status] ?? row.status)),
+    },
+  ];
 
   if (error) return <ErrorState message={errorMessage(t, error)} onRetry={() => void refetch()} />;
 
@@ -153,93 +226,51 @@ export default function FinancePage() {
         </SectionCard>
       </div>
 
-      <SectionCard title={t('finance.recentTransactions')} className="mt-4" noPadding>
-        {isLoading ? (
-          <div className="p-5">
-            <ChartSkeleton height={200} />
-          </div>
-        ) : !data?.transactions.length ? (
-          <EmptyState title={t('finance.noTransactions')} description={t('finance.noTransactionsHint')} />
-        ) : (
-          <>
-            {/* Table for tablet and up */}
-            <div className="hidden overflow-x-auto sm:block">
-              <table className="w-full min-w-[640px] border-collapse">
-                <thead>
-                  <tr className="border-b border-line bg-canvas/60">
-                    {[t('common.date'), t('finance.particulars'), t('common.reference'), t('common.amount'), t('common.status')].map((heading, index) => (
-                      <th
-                        key={heading}
-                        scope="col"
-                        className={`px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-ink-muted ${index === 3 ? 'text-right' : 'text-left'}`}
-                      >
-                        {heading}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-line">
-                  {data.transactions.map((transaction) => (
-                    <tr key={`${transaction.direction}-${transaction.id}`} className="transition-colors hover:bg-canvas/60">
-                      <td className="whitespace-nowrap px-4 py-2.5 text-[12.5px] text-ink-muted">{formatDate(transaction.date)}</td>
-                      <td className="px-4 py-2.5">
-                        <Link to={transaction.link} className="text-[12.5px] font-medium text-ink hover:text-brand hover:underline">
-                          {transaction.particulars}
-                        </Link>
-                      </td>
-                      <td className="px-4 py-2.5 text-[12px] text-ink-muted">{transaction.reference}</td>
-                      <td className="px-4 py-2.5 text-right">
-                        <span
-                          className={`inline-flex items-center gap-1 text-[12.5px] font-semibold tnum ${
-                            transaction.direction === 'IN' ? 'text-success' : 'text-ink'
-                          }`}
-                        >
-                          {transaction.direction === 'IN' ? (
-                            <ArrowUpRight className="h-3 w-3" aria-hidden="true" />
-                          ) : (
-                            <ArrowDownRight className="h-3 w-3 text-accent" aria-hidden="true" />
-                          )}
-                          {formatCurrency(transaction.amount)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        {transaction.direction === 'IN' ? (
-                          <span className="text-[12px] text-success">{t('finance.received')}</span>
-                        ) : (
-                          <StatusBadge status={transaction.status} />
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Cards on phone */}
-            <ul className="divide-y divide-line sm:hidden">
-              {data.transactions.map((transaction) => (
-                <li key={`m-${transaction.direction}-${transaction.id}`}>
-                  <Link to={transaction.link} className="flex items-center gap-3 px-4 py-3 active:bg-canvas">
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[13px] font-medium text-ink">{transaction.particulars}</span>
-                      <span className="mt-0.5 block text-[11.5px] text-ink-muted">
-                        {transaction.reference} · {formatDate(transaction.date)}
-                      </span>
-                    </span>
-                    <span
-                      className={`shrink-0 text-[13px] font-semibold tnum ${
-                        transaction.direction === 'IN' ? 'text-success' : 'text-ink'
-                      }`}
-                    >
-                      {transaction.direction === 'IN' ? '+' : '−'}
-                      {formatCurrency(transaction.amount)}
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
+      <SectionCard
+        title={t('finance.recentTransactions')}
+        className="mt-4"
+        noPadding
+        action={
+          Boolean(data?.transactions.length) && (
+            <ExportMenu
+              size="sm"
+              fileBase="finance-transactions"
+              title={t('finance.recentTransactions')}
+              subtitle={`${t('common.financialYearShort', { year: financialYear })}${
+                month !== 'all' ? ` · ${monthOptions().find((option) => option.value === month)?.label ?? month}` : ''
+              }`}
+              columns={transactionExportColumns}
+              rows={data?.transactions ?? []}
+            />
+          )
+        }
+      >
+        <DataTable
+          columns={transactionColumns}
+          data={data?.transactions ?? []}
+          isLoading={isLoading}
+          getRowId={(row) => `${row.direction}-${row.id}`}
+          showColumnToggle={false}
+          mobileBreakpoint="sm"
+          tableClassName="min-w-[640px]"
+          emptyState={<EmptyState title={t('finance.noTransactions')} description={t('finance.noTransactionsHint')} />}
+          mobileCard={(transaction) => (
+            <Link to={transaction.link} className="flex items-center gap-3 px-4 py-3 active:bg-canvas">
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] font-medium text-ink">{transaction.particulars}</span>
+                <span className="mt-0.5 block text-[11.5px] text-ink-muted">
+                  {transaction.reference} · {formatDate(transaction.date)}
+                </span>
+              </span>
+              <span
+                className={`shrink-0 text-[13px] font-semibold tnum ${transaction.direction === 'IN' ? 'text-success' : 'text-ink'}`}
+              >
+                {transaction.direction === 'IN' ? '+' : '−'}
+                {formatCurrency(transaction.amount)}
+              </span>
+            </Link>
+          )}
+        />
       </SectionCard>
 
       <RecordIncomeDialog
@@ -286,7 +317,7 @@ function RecordIncomeDialog({ open, onOpenChange }: { open: boolean; onOpenChang
   } = useForm<IncomeValues>({
     resolver: zodResolver(incomeSchema),
     defaultValues: {
-      date: new Date().toISOString().slice(0, 10),
+      date: todayLocal(),
       source: '',
       amount: 0,
       fundId: '',
@@ -326,7 +357,7 @@ function RecordIncomeDialog({ open, onOpenChange }: { open: boolean; onOpenChang
           <DialogBody>
             <div className="grid gap-3 sm:grid-cols-2">
               <FormField label={t('common.date')} htmlFor="income-date" required error={errors.date?.message}>
-                <DateInput id="income-date" max={new Date().toISOString().slice(0, 10)} invalid={Boolean(errors.date)} {...register('date')} />
+                <DateInput id="income-date" max={todayLocal()} invalid={Boolean(errors.date)} {...register('date')} />
               </FormField>
 
               <FormField label={t('common.amount')} htmlFor="income-amount" required error={errors.amount?.message}>

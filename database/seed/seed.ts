@@ -378,33 +378,33 @@ async function seedOrganization(spec: OrgSpec) {
   const donorSpecs = [
     {
       name: 'Shantaram Joshi', category: 'INDIVIDUAL' as const, phone: '9822110011', whatsapp: '9822110011',
-      email: 'shantaram.joshi@example.com', pan: 'ABCPJ1234K', city: spec.city, language: 'mr', optIn: true,
+      email: 'shantaram.joshi@example.com', pan: 'ABCPJ1234K', district: spec.city, village: 'Kothrud', language: 'mr', optIn: true,
       tags: ['Annadan', 'Monthly'], dob: '1956-08-15', anniversary: '1981-05-10',
       notes: 'Sponsors the Ekadashi annadan every month.',
     },
     {
       name: 'Kamala Devi Trust', category: 'TRUST' as const, phone: '02025530011', whatsapp: '9822110022',
-      email: 'office@kamaladevitrust.example.org', pan: 'AAATK4455L', city: 'Mumbai', language: 'en', optIn: true,
+      email: 'office@kamaladevitrust.example.org', pan: 'AAATK4455L', district: 'Mumbai', village: null, language: 'en', optIn: true,
       tags: ['Gurukul', 'CSR', 'Major Donor'], notes: 'Annual gurukul scholarship grant; receipts to the trust office.',
     },
     {
       name: 'Nitin Agarwal', category: 'INDIVIDUAL' as const, phone: '9822110033', whatsapp: null,
-      email: 'nitin.agarwal@example.com', pan: 'ACDPA7788M', city: 'Nagpur', language: 'en', optIn: false,
+      email: 'nitin.agarwal@example.com', pan: 'ACDPA7788M', district: 'Nagpur', village: 'Hingna', language: 'en', optIn: false,
       tags: ['General'], dob: '1972-01-26', notes: 'Prefers cheque. Has not agreed to WhatsApp messages yet.',
     },
     {
       name: 'Lakshmi Foundation', category: 'ORGANIZATION' as const, phone: '9822110044', whatsapp: '9822110044',
-      email: 'grants@lakshmifoundation.example.org', pan: 'AAALL9900N', city: spec.city, language: 'mr', optIn: true,
+      email: 'grants@lakshmifoundation.example.org', pan: 'AAALL9900N', district: spec.city, village: null, language: 'mr', optIn: true,
       tags: ['Gaushala', 'Major Donor'], notes: 'Supports cattle care and the veterinary fund.',
     },
     {
       name: 'Anonymous Well-wisher', category: 'INDIVIDUAL' as const, phone: null, whatsapp: null,
-      email: null, pan: null, city: null, language: 'mr', optIn: false, tags: ['Anonymous'],
+      email: null, pan: null, district: null, village: null, language: 'mr', optIn: false, tags: ['Anonymous'],
       notes: 'Cash offerings from the donation box.',
     },
     {
       name: 'Sunita Kulkarni', category: 'FAMILY' as const, phone: '9822110066', whatsapp: '9822110066',
-      email: 'sunita.k@example.com', pan: null, city: spec.city, language: 'mr', optIn: true,
+      email: 'sunita.k@example.com', pan: null, district: spec.city, village: 'Wagholi', language: 'mr', optIn: true,
       tags: ['Annadan', 'Festival'], anniversary: '1998-11-22', notes: 'Family seva on Guru Purnima.',
     },
   ];
@@ -425,8 +425,9 @@ async function seedOrganization(spec: OrgSpec) {
         whatsappNumber: donor.whatsapp,
         email: donor.email,
         panNumber: donor.pan,
-        city: donor.city,
-        state: donor.city ? spec.state : null,
+        state: donor.district ? spec.state : null,
+        district: donor.district,
+        village: donor.village,
         preferredLanguage: donor.language,
         tags: donor.tags,
         dateOfBirth: 'dob' in donor && donor.dob ? new Date(donor.dob) : null,

@@ -28,6 +28,8 @@ import { FilterBar, FilterField } from '@/components/common/FilterBar';
 import { StatusBadge } from '@/components/common/StatusBadge';
 import { EmptyState } from '@/components/common/states';
 import { ConfirmationDialog } from '@/components/common/ConfirmationDialog';
+import { ExportMenu } from '@/components/common/ExportMenu';
+import { fetchAllPages, type ExportColumn } from '@/lib/export';
 import { Button } from '@/components/ui/button';
 import { SimpleSelect } from '@/components/ui/select';
 import { DateInput } from '@/components/common/forms';
@@ -322,6 +324,27 @@ export default function ExpenseListPage() {
 
   const sorting: SortingState = [{ id: filters.sortBy, desc: filters.sortDir === 'desc' }];
 
+  const exportColumns: ExportColumn<ExpenseListRow>[] = [
+    { header: t('expenses.number'), value: (row) => row.expenseNumber },
+    { header: t('common.date'), type: 'date', value: (row) => row.date },
+    { header: t('expenses.expense'), value: (row) => row.title },
+    { header: t('common.department'), value: (row) => row.department.name },
+    { header: t('common.fund'), value: (row) => row.fund.name },
+    { header: t('common.category'), value: (row) => row.category.name },
+    { header: t('common.supplier'), value: (row) => row.supplier?.name },
+    { header: t('dataExport.cols.onBehalfOf'), value: (row) => row.onBehalfOf?.name },
+    { header: t('dataExport.cols.createdBy'), value: (row) => row.createdBy.name },
+    { header: t('common.amount'), type: 'currency', value: (row) => row.total },
+    { header: t('dataExport.cols.paidAmount'), type: 'currency', value: (row) => row.paidAmount },
+    { header: t('common.status'), value: (row) => labels.expenseStatus[row.status] ?? row.status },
+    { header: t('dataExport.cols.paymentStatus'), value: (row) => labels.paymentStatus[row.paymentStatus] ?? row.paymentStatus },
+  ];
+
+  const fetchExportRows = () =>
+    fetchAllPages((page, pageSize) =>
+      api.get<ExpenseListResponse>('/expenses' + buildQuery({ ...queryParams, page, pageSize })),
+    );
+
   return (
     <>
       <PageHeader
@@ -332,14 +355,17 @@ export default function ExpenseListPage() {
             : t('expenses.subtitle')
         }
         actions={
-          can('expense.create') && (
-            <Button asChild>
-              <Link to="/expenses/new">
-                <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                {t('expenses.add')}
-              </Link>
-            </Button>
-          )
+          <div className="flex flex-wrap items-center gap-2">
+            <ExportMenu fileBase="expenses" title={t('expenses.title')} columns={exportColumns} fetchRows={fetchExportRows} />
+            {can('expense.create') && (
+              <Button asChild>
+                <Link to="/expenses/new">
+                  <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                  {t('expenses.add')}
+                </Link>
+              </Button>
+            )}
+          </div>
         }
       />
 

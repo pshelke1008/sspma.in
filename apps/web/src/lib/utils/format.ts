@@ -33,6 +33,18 @@ export function formatNumber(value: number | string | null | undefined, decimals
   }).format(Number(value ?? 0));
 }
 
+/**
+ * Today's calendar date as YYYY-MM-DD in the browser's own time zone.
+ * `toISOString()` is UTC, which in India reads as yesterday until 05:30 and can
+ * drop a 1 April entry into the previous financial year.
+ */
+export function todayLocal(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
 export function formatDate(value: string | Date | null | undefined, style: 'short' | 'medium' | 'long' | 'input' = 'medium') {
   if (!value) return '—';
   const date = typeof value === 'string' ? new Date(value) : value;
