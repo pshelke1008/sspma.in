@@ -6,29 +6,56 @@
  * after a donor's last message, only approved templates may be sent.
  */
 import { env } from '../../env';
-import { WhatsAppError, WhatsAppErrorCode } from './errors';
+import { WhatsAppError, WhatsAppErrorCode, codeForMetaError, metaErrorDetail } from './errors';
+import {
+  buildCreatePayload,
+  parseTemplate,
+  type CreateTemplateInput,
+  type MessageTemplate,
+  type RawTemplate,
+} from './templates';
+
+export type { MessageTemplate } from './templates';
 
 interface GraphErrorBody {
-  error?: { message?: string; code?: number; error_subcode?: number; error_data?: { details?: string } };
+  error?: {
+    message?: string;
+    code?: number;
+    error_subcode?: number;
+    error_user_msg?: string;
+    error_data?: { details?: string };
+  };
 }
 
-function mapGraphError(status: number, body: GraphErrorBody): WhatsAppError {
+function mapGraphError(status: number, body: GraphErrorBody, explain = false): WhatsAppError {
   const code = body.error?.code;
   if (status === 401 || code === 190 || code === 10 || code === 200) {
     return new WhatsAppError(WhatsAppErrorCode.CLOUD_AUTH_FAILED);
   }
-  if (code === 131047) return new WhatsAppError(WhatsAppErrorCode.OUTSIDE_WINDOW);
-  if (code === 131026) return new WhatsAppError(WhatsAppErrorCode.NOT_ON_WHATSAPP);
-  if (code === 131030) return new WhatsAppError(WhatsAppErrorCode.RECIPIENT_NOT_ALLOWED);
-  if (code === 132001 || code === 132000) return new WhatsAppError(WhatsAppErrorCode.TEMPLATE_NOT_FOUND);
+  // Template management: Meta's own wording ("name already exists in this
+  // language", "body cannot start with a variable") is what the user must act on.
+  if (explain) {
+    const detail = body.error?.error_user_msg ?? body.error?.error_data?.details ?? body.error?.message;
+    return new WhatsAppError(WhatsAppErrorCode.TEMPLATE_INVALID, detail?.slice(0, 300));
+  }
   if (code === 100 && body.error?.error_subcode === 33) return new WhatsAppError(WhatsAppErrorCode.CLOUD_AUTH_FAILED);
-  return new WhatsAppError(WhatsAppErrorCode.SEND_FAILED);
+  return new WhatsAppError(
+    codeForMetaError(code),
+    undefined,
+    metaErrorDetail({ code, message: body.error?.error_user_msg ?? body.error?.error_data?.details ?? body.error?.message }),
+  );
 }
 
 async function graph<T>(
   path: string,
   token: string,
-  init: { method?: 'GET' | 'POST'; body?: unknown; query?: Record<string, string> } = {},
+  init: {
+    method?: 'GET' | 'POST' | 'DELETE';
+    body?: unknown;
+    query?: Record<string, string>;
+    /** Surface Meta's own explanation on failure (template management only). */
+    explain?: boolean;
+  } = {},
 ): Promise<T> {
   const url = new URL(`${env.whatsapp.graphUrl}/${env.whatsapp.graphVersion}/${path}`);
   for (const [key, value] of Object.entries(init.query ?? {})) url.searchParams.set(key, value);
@@ -52,7 +79,7 @@ async function graph<T>(
   if (!response.ok || payload.error) {
     // Logged without the token; the payload only carries Meta's error object.
     console.warn('[whatsapp] Graph API error', { path: path.split('/')[1] ?? path, status: response.status, code: payload.error?.code });
-    throw mapGraphError(response.status, payload);
+    throw mapGraphError(response.status, payload, init.explain);
   }
   return payload;
 }
@@ -69,38 +96,92 @@ export function verifyPhoneNumber(phoneNumberId: string, token: string) {
   });
 }
 
-export interface MessageTemplate {
-  name: string;
-  language: string;
-  status: string;
-  category: string;
-  /** How many {{n}} body parameters the template expects. */
-  bodyParameterCount: number;
-  bodyText: string;
+const TEMPLATE_PAGE_SIZE = '100';
+/** Guards against a runaway cursor; 10 pages is 1,000 templates. */
+const TEMPLATE_MAX_PAGES = 10;
+
+/** Every template of the business account, whatever its review status. */
+export async function listTemplates(businessAccountId: string, token: string): Promise<MessageTemplate[]> {
+  type Page = { data: RawTemplate[]; paging?: { cursors?: { after?: string }; next?: string } };
+  const templates: MessageTemplate[] = [];
+  let after: string | undefined;
+
+  for (let page = 0; page < TEMPLATE_MAX_PAGES; page += 1) {
+    const result = await graph<Page>(`${businessAccountId}/message_templates`, token, {
+      query: {
+        fields: 'id,name,language,status,category,parameter_format,rejected_reason,components',
+        limit: TEMPLATE_PAGE_SIZE,
+        ...(after ? { after } : {}),
+      },
+    });
+    templates.push(...result.data.map(parseTemplate));
+    after = result.paging?.next ? result.paging.cursors?.after : undefined;
+    if (!after) break;
+  }
+
+  return templates.sort((a, b) => a.name.localeCompare(b.name) || a.language.localeCompare(b.language));
 }
 
-export async function listApprovedTemplates(businessAccountId: string, token: string): Promise<MessageTemplate[]> {
-  const result = await graph<{
-    data: { name: string; language: string; status: string; category: string; components?: { type: string; text?: string }[] }[];
-  }>(`${businessAccountId}/message_templates`, token, {
-    query: { fields: 'name,language,status,category,components', limit: '200' },
+/** Submits a new template for Meta's review. It stays PENDING until approved. */
+export async function createTemplate(
+  businessAccountId: string,
+  token: string,
+  input: CreateTemplateInput,
+): Promise<{ id: string; status: string; category: string }> {
+  return graph(`${businessAccountId}/message_templates`, token, {
+    method: 'POST',
+    body: buildCreatePayload(input),
+    explain: true,
   });
+}
 
-  return result.data
-    .filter((template) => template.status === 'APPROVED')
-    .map((template) => {
-      const body = template.components?.find((component) => component.type === 'BODY')?.text ?? '';
-      const placeholders = new Set(body.match(/\{\{\d+\}\}/g) ?? []);
-      return {
-        name: template.name,
-        language: template.language,
-        status: template.status,
-        category: template.category,
-        bodyParameterCount: placeholders.size,
-        bodyText: body,
-      };
-    })
-    .sort((a, b) => a.name.localeCompare(b.name));
+/** Deletes one language of a template when `templateId` is given, otherwise every language. */
+export async function deleteTemplate(
+  businessAccountId: string,
+  token: string,
+  name: string,
+  templateId?: string,
+): Promise<void> {
+  await graph(`${businessAccountId}/message_templates`, token, {
+    method: 'DELETE',
+    query: { name, ...(templateId ? { hsm_id: templateId } : {}) },
+    explain: true,
+  });
+}
+
+/**
+ * Meta's resumable upload of the sample file a media-header template is
+ * reviewed with. Returns the handle that goes in the template's header example.
+ */
+export async function uploadTemplateSample(
+  token: string,
+  file: { buffer: Buffer; mimeType: string; fileName: string },
+): Promise<string> {
+  const appId = env.whatsapp.appId;
+  if (!appId) throw new WhatsAppError(WhatsAppErrorCode.OAUTH_NOT_CONFIGURED);
+
+  const session = await graph<{ id?: string }>(`${appId}/uploads`, token, {
+    method: 'POST',
+    query: { file_name: file.fileName, file_length: String(file.buffer.length), file_type: file.mimeType },
+    explain: true,
+  });
+  if (!session.id) throw new WhatsAppError(WhatsAppErrorCode.TEMPLATE_INVALID);
+
+  let response: Response;
+  try {
+    response = await fetch(`${env.whatsapp.graphUrl}/${env.whatsapp.graphVersion}/${session.id}`, {
+      method: 'POST',
+      // Meta's upload endpoint wants the "OAuth" scheme rather than "Bearer".
+      headers: { Authorization: `OAuth ${token}`, file_offset: '0' },
+      body: file.buffer,
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch {
+    throw new WhatsAppError(WhatsAppErrorCode.CLOUD_UNREACHABLE);
+  }
+  const payload = (await response.json().catch(() => ({}))) as { h?: string } & GraphErrorBody;
+  if (!response.ok || payload.error || !payload.h) throw mapGraphError(response.status, payload, true);
+  return payload.h;
 }
 
 interface SendResult {
@@ -125,8 +206,25 @@ export async function sendTemplate(
   phoneNumberId: string,
   token: string,
   to: string,
-  template: { name: string; language: string; bodyParams: string[] },
+  template: {
+    name: string;
+    language: string;
+    bodyParams: string[];
+    /** An uploaded file for a template whose header is an image, video or document. */
+    headerMedia?: { kind: 'image' | 'video' | 'document'; mediaId: string; fileName?: string | null } | null;
+  },
 ): Promise<string> {
+  const components: Record<string, unknown>[] = [];
+  if (template.headerMedia) {
+    const { kind, mediaId, fileName } = template.headerMedia;
+    components.push({
+      type: 'header',
+      parameters: [{ type: kind, [kind]: { id: mediaId, ...(kind === 'document' && fileName ? { filename: fileName } : {}) } }],
+    });
+  }
+  if (template.bodyParams.length) {
+    components.push({ type: 'body', parameters: template.bodyParams.map((text) => ({ type: 'text', text })) });
+  }
   const result = await graph<SendResult>(`${phoneNumberId}/messages`, token, {
     method: 'POST',
     body: {
@@ -137,13 +235,7 @@ export async function sendTemplate(
       template: {
         name: template.name,
         language: { code: template.language },
-        ...(template.bodyParams.length
-          ? {
-              components: [
-                { type: 'body', parameters: template.bodyParams.map((text) => ({ type: 'text', text })) },
-              ],
-            }
-          : {}),
+        ...(components.length ? { components } : {}),
       },
     },
   });

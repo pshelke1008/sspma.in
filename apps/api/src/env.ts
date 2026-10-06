@@ -58,10 +58,24 @@ export const env = {
     encryptionKey: process.env.WHATSAPP_ENCRYPTION_KEY || undefined,
     webEnabled: (process.env.WHATSAPP_WEB_ENABLED ?? 'true') === 'true',
     monthlyLimit: int('WHATSAPP_MONTHLY_LIMIT', 250),
+    /** How often scheduled broadcasts are checked for being due. */
+    schedulerIntervalMs: int('WHATSAPP_SCHEDULER_INTERVAL_MS', 30_000),
     graphUrl: process.env.WHATSAPP_GRAPH_URL ?? 'https://graph.facebook.com',
     graphVersion: process.env.WHATSAPP_GRAPH_VERSION ?? 'v21.0',
     webhookVerifyToken: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || undefined,
-    appSecret: process.env.WHATSAPP_APP_SECRET || process.env.META_APP_SECRET || undefined,
+    /**
+     * Meta app secret(s). Several, comma-separated, are accepted for the webhook: one
+     * WhatsApp account can be subscribed by more than one Meta app (for example when it
+     * is shared with another product), and each app signs its callbacks with its own secret.
+     * The first is the one used for Facebook login and token checks.
+     */
+    appSecrets: (process.env.WHATSAPP_APP_SECRET || process.env.META_APP_SECRET || '')
+      .split(',')
+      .map((secret) => secret.trim())
+      .filter(Boolean),
+    get appSecret(): string | undefined {
+      return this.appSecrets[0];
+    },
     /** Meta app ID, for "Connect with Facebook". Without it only manual token entry is offered. */
     appId: process.env.WHATSAPP_APP_ID || process.env.META_APP_ID || undefined,
     /**

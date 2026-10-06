@@ -495,6 +495,7 @@ function MessageBubble({ message, grouped, onMediaLoad }: { message: InboxMessag
               : message.status === 'SKIPPED'
                 ? t('whatsappInbox.skippedGeneric')
                 : t('whatsappInbox.failedGeneric')}
+            {message.errorDetail && <span className="block text-ink-muted [overflow-wrap:anywhere]">{message.errorDetail}</span>}
           </p>
         )}
       </div>

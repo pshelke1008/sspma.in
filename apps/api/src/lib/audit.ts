@@ -28,6 +28,8 @@ export const AUDIT_ACTIONS = {
   WHATSAPP_DISCONNECTED: 'whatsapp.disconnected',
   WHATSAPP_MESSAGE_SENT: 'whatsapp.message_sent',
   WHATSAPP_BROADCAST_CREATED: 'whatsapp.broadcast_created',
+  WHATSAPP_TEMPLATE_CREATED: 'whatsapp.template_created',
+  WHATSAPP_TEMPLATE_DELETED: 'whatsapp.template_deleted',
   INCOME_CREATED: 'income.created',
   PURCHASE_CREATED: 'purchase.created',
   TRANSFER_CREATED: 'transfer.created',

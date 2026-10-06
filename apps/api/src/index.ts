@@ -4,7 +4,7 @@ import { prisma } from './db';
 import { purgeExpiredSessions } from './modules/auth/auth.service';
 import { hasEncryptionKey } from './modules/whatsapp/crypto';
 import { restoreAllConnections } from './modules/whatsapp/connectionManager';
-import { registerLinkedDeviceHandlers, resumeBroadcasts } from './modules/whatsapp/messaging.service';
+import { registerLinkedDeviceHandlers, resumeBroadcasts, startBroadcastScheduler } from './modules/whatsapp/messaging.service';
 
 async function main() {
   await prisma.$connect();
@@ -21,11 +21,14 @@ async function main() {
   registerLinkedDeviceHandlers();
   if (!hasEncryptionKey()) {
     console.warn('  WhatsApp        →  disabled (WHATSAPP_ENCRYPTION_KEY not set)');
-  } else if (!env.isTest) {
-    if (env.whatsapp.webEnabled) {
-      restoreAllConnections().catch((error) => console.error('[whatsapp] restore failed', error));
+  } else {
+    if (!env.isTest) {
+      if (env.whatsapp.webEnabled) {
+        restoreAllConnections().catch((error) => console.error('[whatsapp] restore failed', error));
+      }
+      resumeBroadcasts();
     }
-    resumeBroadcasts();
+    startBroadcastScheduler();
   }
 
   // Housekeeping: drop expired sessions hourly.

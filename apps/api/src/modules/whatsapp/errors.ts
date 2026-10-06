@@ -13,6 +13,21 @@ export const WhatsAppErrorCode = {
   CLOUD_UNREACHABLE: 'WHATSAPP_CLOUD_UNREACHABLE',
   OUTSIDE_WINDOW: 'WHATSAPP_OUTSIDE_WINDOW',
   TEMPLATE_NOT_FOUND: 'WHATSAPP_TEMPLATE_NOT_FOUND',
+  TEMPLATE_UNSUPPORTED: 'WHATSAPP_TEMPLATE_UNSUPPORTED',
+  TEMPLATE_PARAMS_MISMATCH: 'WHATSAPP_TEMPLATE_PARAMS_MISMATCH',
+  TEMPLATE_HEADER_MEDIA_REQUIRED: 'WHATSAPP_TEMPLATE_HEADER_MEDIA_REQUIRED',
+  MISSING_DATA: 'WHATSAPP_MISSING_DATA',
+  MEDIA_INVALID: 'WHATSAPP_MEDIA_INVALID',
+  SCHEDULE_INVALID: 'WHATSAPP_SCHEDULE_INVALID',
+  UPLOAD_INVALID: 'WHATSAPP_UPLOAD_INVALID',
+  TEMPLATE_PAUSED: 'WHATSAPP_TEMPLATE_PAUSED',
+  TEMPLATE_INVALID: 'WHATSAPP_TEMPLATE_INVALID',
+  RATE_LIMITED: 'WHATSAPP_RATE_LIMITED',
+  PAYMENT_ISSUE: 'WHATSAPP_PAYMENT_ISSUE',
+  ACCOUNT_RESTRICTED: 'WHATSAPP_ACCOUNT_RESTRICTED',
+  ENGAGEMENT_LIMIT: 'WHATSAPP_ENGAGEMENT_LIMIT',
+  DISPLAY_NAME_PENDING: 'WHATSAPP_DISPLAY_NAME_PENDING',
+  MEDIA_FAILED: 'WHATSAPP_MEDIA_FAILED',
   RECIPIENT_NOT_ALLOWED: 'WHATSAPP_RECIPIENT_NOT_ALLOWED',
   INVALID_NUMBER: 'WHATSAPP_INVALID_NUMBER',
   NOT_ON_WHATSAPP: 'WHATSAPP_NOT_ON_WHATSAPP',
@@ -45,6 +60,23 @@ const MESSAGES: Record<WhatsAppErrorCodeValue, string> = {
   WHATSAPP_CLOUD_UNREACHABLE: 'Could not reach the WhatsApp Cloud API. Please try again.',
   WHATSAPP_OUTSIDE_WINDOW: 'More than 24 hours have passed since this donor last messaged you. Send an approved template instead.',
   WHATSAPP_TEMPLATE_NOT_FOUND: 'That message template does not exist or is not approved for this language.',
+  WHATSAPP_TEMPLATE_UNSUPPORTED: 'This template needs a dynamic button, a header variable or named variables, which cannot be sent from here yet.',
+  WHATSAPP_TEMPLATE_HEADER_MEDIA_REQUIRED: 'This template has an image, video or document header. Attach the file to send.',
+  WHATSAPP_MISSING_DATA: 'A value this message needs is missing for this donor.',
+  WHATSAPP_MEDIA_INVALID: 'That file cannot be used as this template\'s header. Check the file type and size.',
+  WHATSAPP_SCHEDULE_INVALID: 'Choose a time at least a few minutes from now, within the next 30 days.',
+  WHATSAPP_UPLOAD_INVALID: 'That spreadsheet could not be read. Use an .xlsx file with a column for phone numbers.',
+  WHATSAPP_TEMPLATE_PARAMS_MISMATCH: 'Fill in a value for every variable of the template.',
+  WHATSAPP_TEMPLATE_PAUSED: 'Meta has paused or disabled this template because of its quality. Choose another template.',
+  // Carries Meta's own explanation (e.g. a name that already exists), so it has no fixed translation.
+  WHATSAPP_TEMPLATE_INVALID: 'Meta did not accept this template.',
+  WHATSAPP_RATE_LIMITED: 'WhatsApp is limiting how fast messages can be sent. Please try again shortly.',
+  WHATSAPP_PAYMENT_ISSUE:
+    'Meta will not send messages for this WhatsApp Business Account until billing is set up. In Meta Business Settings → WhatsApp accounts → Payment settings, set the currency and add a payment method.',
+  WHATSAPP_ACCOUNT_RESTRICTED: 'This WhatsApp Business Account or number is restricted or locked by Meta. Check its status in Meta Business Manager.',
+  WHATSAPP_ENGAGEMENT_LIMIT: 'Meta chose not to deliver this message to this person to keep conversations healthy. It may succeed later.',
+  WHATSAPP_DISPLAY_NAME_PENDING: 'The WhatsApp display name for this number has not been approved yet.',
+  WHATSAPP_MEDIA_FAILED: 'WhatsApp could not use the media (image, video or document) in this message.',
   WHATSAPP_RECIPIENT_NOT_ALLOWED: 'This number is not on your Cloud API test recipient list.',
   WHATSAPP_INVALID_NUMBER: 'This donor does not have a valid mobile number.',
   WHATSAPP_NOT_ON_WHATSAPP: 'That number does not have a WhatsApp account.',
@@ -73,10 +105,73 @@ const BAD_REQUEST_CODES = new Set<WhatsAppErrorCodeValue>([
   'WHATSAPP_EMPTY_MESSAGE',
   'WHATSAPP_NO_RECIPIENTS',
   'WHATSAPP_MEDIA_NEEDS_CLOUD',
+  'WHATSAPP_TEMPLATE_UNSUPPORTED',
+  'WHATSAPP_TEMPLATE_PARAMS_MISMATCH',
+  'WHATSAPP_TEMPLATE_HEADER_MEDIA_REQUIRED',
+  'WHATSAPP_TEMPLATE_INVALID',
+  'WHATSAPP_MEDIA_INVALID',
+  'WHATSAPP_SCHEDULE_INVALID',
+  'WHATSAPP_UPLOAD_INVALID',
 ]);
 
+/**
+ * What a Meta error code means to us. Used for the error a send call returns and
+ * for the `errors` Meta attaches to a failed delivery receipt, so one failure reads
+ * the same wherever it is noticed.
+ */
+export function codeForMetaError(code: number | undefined): WhatsAppErrorCodeValue {
+  switch (code) {
+    case 131047:
+      return WhatsAppErrorCode.OUTSIDE_WINDOW;
+    case 131026:
+      return WhatsAppErrorCode.NOT_ON_WHATSAPP;
+    case 131030:
+      return WhatsAppErrorCode.RECIPIENT_NOT_ALLOWED;
+    case 131042:
+      return WhatsAppErrorCode.PAYMENT_ISSUE;
+    case 131031:
+      return WhatsAppErrorCode.ACCOUNT_RESTRICTED;
+    case 131037:
+      return WhatsAppErrorCode.DISPLAY_NAME_PENDING;
+    case 131049:
+      return WhatsAppErrorCode.ENGAGEMENT_LIMIT;
+    case 131051:
+    case 131052:
+    case 131053:
+      return WhatsAppErrorCode.MEDIA_FAILED;
+    case 130429:
+    case 131048:
+    case 131056:
+    case 80007:
+      return WhatsAppErrorCode.RATE_LIMITED;
+    case 132000:
+    case 132012:
+      return WhatsAppErrorCode.TEMPLATE_PARAMS_MISMATCH;
+    case 132001:
+      return WhatsAppErrorCode.TEMPLATE_NOT_FOUND;
+    case 132015:
+    case 132016:
+      return WhatsAppErrorCode.TEMPLATE_PAUSED;
+    default:
+      return WhatsAppErrorCode.SEND_FAILED;
+  }
+}
+
+/** "131042: Message failed because …" — Meta's code and its own words, short enough to store. */
+export function metaErrorDetail(error: { code?: number; title?: string; message?: string; details?: string } | undefined): string | null {
+  if (!error) return null;
+  const words = error.details ?? error.message ?? error.title;
+  const text = [error.code, words].filter((part) => part !== undefined && part !== '').join(': ');
+  return text ? text.slice(0, 400) : null;
+}
+
 export class WhatsAppError extends AppError {
-  constructor(public readonly whatsappCode: WhatsAppErrorCodeValue, message?: string) {
+  constructor(
+    public readonly whatsappCode: WhatsAppErrorCodeValue,
+    message?: string,
+    /** Meta's own explanation, when it gave one; stored with a failed message, never shown as the headline. */
+    public readonly detail?: string | null,
+  ) {
     const status =
       whatsappCode === WhatsAppErrorCode.NOT_CONFIGURED || whatsappCode === WhatsAppErrorCode.WEB_DISABLED
         ? 503
@@ -86,6 +181,11 @@ export class WhatsAppError extends AppError {
     super(status, whatsappCode, message ?? MESSAGES[whatsappCode]);
     this.name = 'WhatsAppError';
   }
+}
+
+/** What to store on a failed message: our code, plus Meta's detail if the error carried it. */
+export function failureOf(error: unknown): { error: string; errorDetail: string | null } {
+  return { error: sanitizeError(error), errorDetail: error instanceof WhatsAppError ? (error.detail ?? null) : null };
 }
 
 export function messageFor(code: WhatsAppErrorCodeValue): string {

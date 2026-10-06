@@ -58,6 +58,8 @@ export interface InboxMessage {
   hasMedia: boolean;
   status: MessageStatus;
   error: string | null;
+  /** Meta's own words for a failure, e.g. "131042: … currency is not configured". */
+  errorDetail?: string | null;
   broadcastId: string | null;
   whatsappNumberId: string | null;
   sentAt: string | null;

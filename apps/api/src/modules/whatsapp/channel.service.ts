@@ -142,13 +142,6 @@ export function cloudCredentials(organizationId: string, numberId?: string | nul
   return numbers.credentialsFor(organizationId, numberId);
 }
 
-/** Approved templates of the chosen (or default) number's business account. */
-export async function listTemplates(organizationId: string, numberId?: string | null) {
-  const credentials = await cloudCredentials(organizationId, numberId);
-  if (!credentials.businessAccountId) return [];
-  return cloud.listApprovedTemplates(credentials.businessAccountId, credentials.token);
-}
-
 // ----------------------------- QR / linked device ----------------------------
 
 export async function connectWeb(organizationId: string) {

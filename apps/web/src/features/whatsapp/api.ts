@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import type { WhatsAppConnectionStatusKey, WhatsAppProviderKey } from '@ashram/types';
 import type { BadgeProps } from '@/components/ui/badge';
-import { api } from '@/lib/api/client';
-import { queryKeys } from '@/lib/api/queryClient';
+import { api, buildQuery } from '@/lib/api/client';
+import { queryClient, queryKeys } from '@/lib/api/queryClient';
 
 export interface WhatsAppStatus {
   configured: boolean;
@@ -40,16 +40,52 @@ export interface WhatsAppStatus {
   };
 }
 
-export interface MessageTemplate {
-  name: string;
-  language: string;
-  category: string;
-  bodyParameterCount: number;
-  bodyText: string;
+export type TemplateButtonType = 'QUICK_REPLY' | 'URL' | 'PHONE_NUMBER' | 'OTHER';
+
+export interface TemplateButton {
+  type: TemplateButtonType;
+  text: string;
+  url?: string;
+  phoneNumber?: string;
 }
 
+export type UnsendableReason = 'UNSUPPORTED_HEADER' | 'HEADER_VARIABLE' | 'BUTTON_PARAMETER' | 'NAMED_PARAMETERS' | 'OTHER_COMPONENT';
+
+export interface MessageTemplate {
+  /** Meta's template ID. */
+  id: string;
+  name: string;
+  language: string;
+  /** APPROVED, PENDING, REJECTED, PAUSED, DISABLED … as Meta reports it. */
+  status: string;
+  category: string;
+  rejectedReason: string | null;
+  /** TEXT, IMAGE, VIDEO, DOCUMENT or LOCATION; null with no header. */
+  headerFormat: string | null;
+  /** An image, video or document header: each send brings the file. */
+  requiresHeaderMedia: boolean;
+  headerText: string | null;
+  bodyText: string;
+  footerText: string | null;
+  buttons: TemplateButton[];
+  bodyParameterCount: number;
+  /** False when the template needs something this app cannot supply. */
+  sendable: boolean;
+  unsendableReason: UnsendableReason | null;
+}
+
+/** Colours for Meta's review status; anything unknown stays neutral. */
+export const TEMPLATE_STATUS_TONES: Record<string, NonNullable<BadgeProps['tone']>> = {
+  APPROVED: 'success',
+  PENDING: 'warning',
+  IN_APPEAL: 'warning',
+  PAUSED: 'warning',
+  REJECTED: 'danger',
+  DISABLED: 'danger',
+};
+
 export type MessageStatus = 'QUEUED' | 'SENT' | 'DELIVERED' | 'READ' | 'FAILED' | 'SKIPPED' | 'RECEIVED';
-export type BroadcastStatus = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'CANCELLED';
+export type BroadcastStatus = 'SCHEDULED' | 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'CANCELLED';
 
 export interface WhatsAppMessage {
   id: string;
@@ -60,6 +96,8 @@ export interface WhatsAppMessage {
   templateName: string | null;
   status: MessageStatus;
   error: string | null;
+  /** Meta's own words for a failure, e.g. "131042: … currency is not configured". */
+  errorDetail?: string | null;
   createdAt: string;
   sentAt: string | null;
   deliveredAt: string | null;
@@ -77,8 +115,18 @@ export interface Broadcast {
   status: BroadcastStatus;
   totalRecipients: number;
   sentCount: number;
+  deliveredCount: number;
+  readCount: number;
   failedCount: number;
   skippedCount: number;
+  /** Wizard broadcasts: when it was due to start, how recipients were chosen, a rough cost. */
+  scheduledAt: string | null;
+  audienceMode: 'ALL' | 'FILTER' | 'SELECT' | 'UPLOAD' | null;
+  templateLanguage: string | null;
+  templateCategory: string | null;
+  estimatedCost: string | null;
+  headerFormat: string | null;
+  headerMediaName: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -122,14 +170,46 @@ export function useWhatsAppStatus(enabled = true) {
   });
 }
 
-/** Approved Cloud API templates; only meaningful once the Cloud API is connected. */
+/**
+ * Approved templates that can be sent from here; only meaningful once the Cloud
+ * API is connected. `hidden` counts approved ones left out (header media, …).
+ */
 export function useTemplates(enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.whatsappTemplates,
-    queryFn: () => api.get<{ data: MessageTemplate[] }>('/whatsapp/cloud/templates'),
+    queryFn: () => api.get<{ data: MessageTemplate[]; hidden: number }>('/whatsapp/cloud/templates'),
     enabled,
     staleTime: 5 * 60_000,
   });
+}
+
+/** Every template with its review status, for the management card. */
+export function useAllTemplates(numberId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.whatsappTemplatesAll(numberId ?? ''),
+    queryFn: () => api.get<{ data: MessageTemplate[] }>('/whatsapp/templates' + buildQuery({ numberId })),
+    enabled,
+  });
+}
+
+export interface CreateTemplateBody {
+  numberId?: string | null;
+  name: string;
+  language: string;
+  category: 'UTILITY' | 'MARKETING';
+  headerText?: string | null;
+  headerFormat?: 'IMAGE' | 'VIDEO' | 'DOCUMENT' | null;
+  headerHandle?: string | null;
+  bodyText: string;
+  bodyExamples: string[];
+  footerText?: string | null;
+  buttons: TemplateButton[];
+}
+
+/** Template lists everywhere (picker, inbox, management) are stale after a change. */
+export function invalidateTemplates() {
+  void queryClient.invalidateQueries({ queryKey: ['whatsapp', 'templates'] });
+  void queryClient.invalidateQueries({ queryKey: ['whatsapp', 'inbox', 'templates'] });
 }
 
 /** The provider a send would use right now, mirroring the server's choice. */
@@ -165,6 +245,7 @@ export const MESSAGE_TONES: Record<MessageStatus, Tone> = {
 };
 
 export const BROADCAST_TONES: Record<BroadcastStatus, Tone> = {
+  SCHEDULED: 'accent',
   QUEUED: 'neutral',
   RUNNING: 'info',
   COMPLETED: 'success',

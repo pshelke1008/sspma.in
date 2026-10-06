@@ -59,6 +59,25 @@ export default {
           from: { opacity: '0', transform: 'translateY(6px)' },
           to: { opacity: '1', transform: 'translateY(0)' },
         },
+        // Centred dialogs: the keyframes carry the -50%/-50% centring themselves,
+        // otherwise the animated transform replaces it and the dialog jumps.
+        'dialog-in': {
+          from: { opacity: '0', transform: 'translate(-50%, -48%) scale(0.96)' },
+          to: { opacity: '1', transform: 'translate(-50%, -50%) scale(1)' },
+        },
+        'dialog-out': {
+          from: { opacity: '1', transform: 'translate(-50%, -50%) scale(1)' },
+          to: { opacity: '0', transform: 'translate(-50%, -48%) scale(0.97)' },
+        },
+        'fade-out': { from: { opacity: '1' }, to: { opacity: '0' } },
+        'slide-down': {
+          from: { opacity: '1', transform: 'translateY(0)' },
+          to: { opacity: '0', transform: 'translateY(16px)' },
+        },
+        'slide-out-right': {
+          from: { transform: 'translateX(0)' },
+          to: { transform: 'translateX(100%)' },
+        },
         'slide-in-right': {
           from: { transform: 'translateX(100%)' },
           to: { transform: 'translateX(0)' },
@@ -69,6 +88,11 @@ export default {
       },
       animation: {
         'fade-in': 'fade-in 160ms ease-out',
+        'fade-out': 'fade-out 120ms ease-in forwards',
+        'dialog-in': 'dialog-in 180ms cubic-bezier(0.16, 1, 0.3, 1)',
+        'dialog-out': 'dialog-out 120ms ease-in forwards',
+        'slide-down': 'slide-down 140ms ease-in forwards',
+        'slide-out-right': 'slide-out-right 160ms ease-in forwards',
         'slide-up': 'slide-up 180ms ease-out',
         'slide-in-right': 'slide-in-right 200ms ease-out',
       },

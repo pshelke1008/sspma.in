@@ -303,6 +303,33 @@ export type WhatsAppConnectionStatusKey = (typeof WHATSAPP_CONNECTION_STATUSES)[
  */
 export const MESSAGE_PLACEHOLDERS = ['name', 'total_donated', 'last_donation_date', 'organization'] as const;
 
+/**
+ * Donor details a broadcast template variable can be filled from. Each is a
+ * placeholder the server's renderer understands, so a mapping is just
+ * "variable 2 ← village".
+ */
+export const BROADCAST_DONOR_FIELDS = [
+  'name',
+  'code',
+  'phone',
+  'village',
+  'district',
+  'state',
+  'total_donated',
+  'last_donation_date',
+  'organization',
+] as const;
+export type BroadcastDonorField = (typeof BROADCAST_DONOR_FIELDS)[number];
+
+/** Where one template variable's value comes from for each recipient. */
+export type VariableSource =
+  | { source: 'static'; value: string }
+  | { source: 'donor'; field: BroadcastDonorField }
+  | { source: 'column'; column: string };
+
+/** Variable number ("1", "2" …) → its source. */
+export type VariableMapping = Record<string, VariableSource>;
+
 // ----------------------------- Localisation --------------------------------
 
 export const SUPPORTED_LOCALES = ['en', 'mr'] as const;

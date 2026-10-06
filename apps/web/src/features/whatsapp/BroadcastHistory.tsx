@@ -16,7 +16,7 @@ import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, Dia
 import { formatDate } from '@/lib/utils/format';
 import { BROADCAST_TONES, MESSAGE_TONES, type Broadcast, type BroadcastDetail } from './api';
 
-const isLive = (broadcast: Broadcast) => broadcast.status === 'QUEUED' || broadcast.status === 'RUNNING';
+const isLive = (broadcast: Broadcast) => ['SCHEDULED', 'QUEUED', 'RUNNING'].includes(broadcast.status);
 
 /** Past and running broadcasts, refreshed while any is still sending. */
 export function BroadcastHistory() {
@@ -149,7 +149,10 @@ function BroadcastDetailDialog({ id, onClose }: { id: string | null; onClose: ()
                         <span className="text-[12.5px] text-ink">{message.phone}</span>
                       )}
                       {message.error && (
-                        <p className="text-[11.5px] text-ink-muted">{t(`errors.${message.error}`, { defaultValue: message.error })}</p>
+                        <p className="text-[11.5px] text-ink-muted">
+                          {t(`errors.${message.error}`, { defaultValue: message.error })}
+                          {message.errorDetail ? ` ${t('whatsapp.campaign.metaSays')} ${message.errorDetail}` : ''}
+                        </p>
                       )}
                     </div>
                     <Badge tone={MESSAGE_TONES[message.status]}>{t(`whatsapp.messageStatus.${message.status}`)}</Badge>

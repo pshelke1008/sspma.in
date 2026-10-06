@@ -12,6 +12,19 @@ import { env } from '../../env';
 import { processCloudWebhook } from './messaging.service';
 import { sanitizeError } from './errors';
 
+/**
+ * Whether `signature` (Meta's `X-Hub-Signature-256`) is the HMAC-SHA256 of the raw
+ * body under any of the app secrets. Constant-time: a plain comparison leaks how
+ * much of the digest matched.
+ */
+export function isValidSignature(rawBody: Buffer, signature: string, secrets: string[]): boolean {
+  const received = Buffer.from(signature);
+  return secrets.some((secret) => {
+    const wanted = Buffer.from(`sha256=${crypto.createHmac('sha256', secret).update(rawBody).digest('hex')}`);
+    return received.length === wanted.length && crypto.timingSafeEqual(received, wanted);
+  });
+}
+
 export const whatsappWebhookRouter = Router();
 
 whatsappWebhookRouter.get('/', (req, res) => {
@@ -27,18 +40,11 @@ whatsappWebhookRouter.get('/', (req, res) => {
 
 whatsappWebhookRouter.post('/', (req, res) => {
   const signature = req.headers['x-hub-signature-256'];
-  const secret = env.whatsapp.appSecret;
+  const secrets = env.whatsapp.appSecrets;
   const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
 
-  if (typeof signature !== 'string' || !secret || !rawBody) return res.sendStatus(403);
-
-  const expected = `sha256=${crypto.createHmac('sha256', secret).update(rawBody).digest('hex')}`;
-  const received = Buffer.from(signature);
-  const wanted = Buffer.from(expected);
-  // Constant-time: a plain comparison leaks how much of the digest matched.
-  if (received.length !== wanted.length || !crypto.timingSafeEqual(received, wanted)) {
-    return res.sendStatus(403);
-  }
+  if (typeof signature !== 'string' || secrets.length === 0 || !rawBody) return res.sendStatus(403);
+  if (!isValidSignature(rawBody, signature, secrets)) return res.sendStatus(403);
 
   // Acknowledge at once — Meta retries slow responses — then process.
   res.sendStatus(200);
