@@ -1,0 +1,181 @@
+# SSPMA (Ashram Management) — application compose for the Nirantix platform.
+#
+# ONE deployable unit, TWO services. The repository is a monorepo, so the
+# server holds a single clone at
+#
+#   /opt/platform/applications/sspma/<env>/app/
+#
+# and this file runs both images from it, each tagged with the same commit.
+# The platform's app-deploy.sh verifies every container a compose file starts,
+# not just the first, so both are checked against the commit on every deploy.
+#
+# ── One file, one environment per --env-file ─────────────────────────────────
+#
+#   deploy/prod.env    ENVIRONMENT=prod   APP_HOST=sspma.nirantix.com
+#
+# Nothing here is typed by hand. app-deploy.sh exports VERSION, pulls, runs
+# deploy/migrate.sh and only then `up -d`. See deploy/DEPLOY.md.
+#
+# There are no defaults for ENVIRONMENT, VERSION or APP_HOST on purpose: a
+# forgotten --env-file must fail loudly, not quietly route the wrong thing.
+#
+# Secrets live in the platform's secrets tree, NOT in the repo:
+#   /opt/platform/secrets/applications/sspma/<env>.env   (chmod 600)
+name: ${ENVIRONMENT:?ENVIRONMENT is required — pass --env-file deploy/prod.env}-sspma
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  api:
+    <<: *hardening
+    # Built and published by .github/workflows/build.yml. The server pulls; it
+    # does not build. There is deliberately no `build:` block: with one,
+    # a failed pull turns into a silent local build on a 2 vCPU host that is
+    # also serving production.
+    #
+    # :? on both, never :- — the :- form is what produced untraceable images
+    # tagged prod-dev on this platform.
+    image: ghcr.io/pshelke1008/sspma-api:${ENVIRONMENT:?see deploy/DEPLOY.md}-${VERSION:?VERSION is required — see deploy/DEPLOY.md}
+
+    # Credentials only: DATABASE_URL, SESSION_SECRET and the WHATSAPP_* keys.
+    # The path is derived from ENVIRONMENT so the secrets file and the deploy
+    # directory cannot drift apart.
+    env_file:
+      - /opt/platform/secrets/applications/sspma/${ENVIRONMENT}.env
+
+    # Derived from APP_HOST so the hostname is written in exactly one place.
+    # These must NOT also appear in the secrets file: `environment:` overrides
+    # `env_file:`, so the file's copy would be read and then discarded.
+    #
+    # WEB_ORIGIN is the CORS allow-list. The web app is on the same origin, but
+    # browsers still send Origin on POST, and src/app.ts rejects anything not
+    # listed — so a wrong value here fails every login, not just cross-site ones.
+    #
+    # API_PUBLIC_URL has no /api suffix: the code appends it. Meta redirects to
+    # ${API_PUBLIC_URL}/api/whatsapp/oauth/callback, and that exact URL must be
+    # listed under "Valid OAuth Redirect URIs" in the Meta app.
+    #
+    # COOKIE_DOMAIN stays unset: one hostname serves both tiers, so a host-only
+    # cookie is the tightest scope that works.
+    environment:
+      WEB_ORIGIN: https://${APP_HOST:?APP_HOST is required — see deploy/prod.env}
+      API_PUBLIC_URL: https://${APP_HOST}
+
+    volumes:
+      # Uploaded receipts, attachments and imports (STORAGE_DRIVER=local, set
+      # in the image). The ONLY state this application keeps outside
+      # PostgreSQL — WhatsApp linked-device sessions are stored in the
+      # database (src/modules/whatsapp/dbAuthState.ts), not here.
+      #
+      # Named explicitly so the backup component can find it by a stable name
+      # rather than by compose's project prefix.
+      - sspma_data:/data/storage
+
+    networks:
+      proxy: {}
+      database:
+        aliases:
+          # The server runs one flat database network; the env token stops two
+          # environments' aliases colliding on it.
+          - sspma-api-${ENVIRONMENT}
+
+    labels:
+      - "com.nirantix.product=sspma"
+      - "com.nirantix.service=api"
+      - "com.nirantix.env=${ENVIRONMENT}"
+      - "traefik.enable=true"
+      # Same hostname as the web app, /api only. Traefik ranks routers by rule
+      # length by default, which already puts this one first; the explicit
+      # priority keeps that true if either rule is ever edited.
+      #
+      # This also routes /api/webhooks/whatsapp, which Meta calls, and
+      # /api/health, which is harmless to expose.
+      #
+      # Router and service names carry the environment because Traefik's
+      # namespace is host-wide: a second router with the same name replaces
+      # the first.
+      - "traefik.http.routers.sspma-api-${ENVIRONMENT}.rule=Host(`${APP_HOST}`${APP_EXTRA_HOSTS:-}) && PathPrefix(`/api`)"
+      - "traefik.http.routers.sspma-api-${ENVIRONMENT}.priority=100"
+      - "traefik.http.routers.sspma-api-${ENVIRONMENT}.entrypoints=websecure"
+      - "traefik.http.routers.sspma-api-${ENVIRONMENT}.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.sspma-api-${ENVIRONMENT}.service=sspma-api-${ENVIRONMENT}"
+      - "traefik.http.services.sspma-api-${ENVIRONMENT}.loadbalancer.server.port=4300"
+
+    deploy:
+      # ONE replica, and this is a correctness constraint rather than a sizing
+      # choice. The broadcast scheduler, the hourly session purge and every
+      # Baileys websocket run inside the process. Two replicas would send each
+      # scheduled broadcast twice and fight over the same WhatsApp sessions.
+      replicas: 1
+      resources:
+        limits:
+          # Express + Prisma + Baileys. The headroom is for ExcelJS and pdfkit,
+          # which buffer whole documents, and for multer's in-memory uploads.
+          # A container at its ceiling SWAPS rather than being OOM-killed, so
+          # `free -h` will not show it — use the cgroup sweep in the platform
+          # CLAUDE.md.
+          cpus: "1.0"
+          memory: ${API_MEMORY_LIMIT:-768M}
+
+  web:
+    <<: *hardening
+    image: ghcr.io/pshelke1008/sspma-web:${ENVIRONMENT:?see deploy/DEPLOY.md}-${VERSION:?VERSION is required — see deploy/DEPLOY.md}
+
+    # No env_file: a static bundle has no use for the application's secrets.
+
+    networks:
+      proxy: {}
+
+    labels:
+      - "com.nirantix.product=sspma"
+      - "com.nirantix.service=web"
+      - "com.nirantix.env=${ENVIRONMENT}"
+      - "traefik.enable=true"
+      - "traefik.http.routers.sspma-web-${ENVIRONMENT}.rule=Host(`${APP_HOST}`${APP_EXTRA_HOSTS:-})"
+      - "traefik.http.routers.sspma-web-${ENVIRONMENT}.entrypoints=websecure"
+      - "traefik.http.routers.sspma-web-${ENVIRONMENT}.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.sspma-web-${ENVIRONMENT}.service=sspma-web-${ENVIRONMENT}"
+      - "traefik.http.services.sspma-web-${ENVIRONMENT}.loadbalancer.server.port=8080"
+
+    deploy:
+      resources:
+        limits:
+          # nginx serving static files idles at a few MB.
+          cpus: "0.5"
+          memory: ${WEB_MEMORY_LIMIT:-64M}
+
+volumes:
+  sspma_data:
+    # <env>_<app>_data, per docs/standards/environments.md in the platform
+    # repository. Without `name:` compose would prefix the project name.
+    name: ${ENVIRONMENT}_sspma_data
+    # The platform's backup discovers volumes by this label rather than from a
+    # list, so this line is the whole registration. Remove it and the uploads
+    # silently stop being backed up.
+    #
+    # Docker sets a volume's labels only when it CREATES the volume. On an
+    # existing volume, adding or changing this does nothing until the volume
+    # is recreated — check with:
+    #   docker volume inspect prod_sspma_data --format '{{json .Labels}}'
+    labels:
+      com.nirantix.backup: "true"
+
+networks:
+  # The server runs a single flat set of networks today. Until the
+  # per-environment split lands, environment separation rests on the naming
+  # above — which is why none of those names may lose its token.
+  proxy:
+    external: true
+  database:
+    external: true
