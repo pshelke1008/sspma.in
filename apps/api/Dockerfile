@@ -43,8 +43,21 @@ RUN --mount=type=cache,target=/root/.npm \
 
 # ---------------------------------------------------------------------------
 # builder — compile apps/api/src -> apps/api/dist.
+#
+# `prisma generate` BEFORE tsc, and this is not optional. `deps` installs with
+# no schema in the image, so @prisma/client's postinstall leaves an empty stub
+# client: no models, no enums, no Prisma.sql. tsc against the stub fails with
+# hundreds of errors that all read as type bugs in the application — "no
+# exported member 'WhatsAppProvider'", "Parameter 'tx' implicitly has an 'any'
+# type" — and none of them mention Prisma generation. That is exactly how the
+# first CI build of this image failed.
+#
+# The runtime stage generates again on its own base; this one exists only to
+# give the compiler the types.
 # ---------------------------------------------------------------------------
 FROM deps AS builder
+COPY database/schema database/schema
+RUN node_modules/.bin/prisma generate --schema database/schema/schema.prisma
 COPY apps/api apps/api
 RUN npm run build -w @ashram/api
 
