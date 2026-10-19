@@ -187,6 +187,24 @@ run_bootstrap                         # for real: prints each new password ONCE
 shred -u ~/sspma-bootstrap.json
 ```
 
+**Demo mode.** `deploy/bootstrap.demo.json` creates the four users the login
+page's "Demo accounts" panel advertises, with its password. It needs no
+editing and holds no secret — the password is already in `LoginPage.tsx`:
+
+```bash
+cd /opt/platform/applications/sspma/prod/app
+export VERSION="$(git describe --tags --always)"
+for mode in --dry-run ""; do
+  docker compose --env-file deploy/prod.env -f deploy/compose.yaml \
+    run --rm -T --no-deps --label traefik.enable=false \
+    api node apps/api/dist/scripts/bootstrap-org.js $mode < deploy/bootstrap.demo.json || break
+done
+```
+
+The loop runs the dry run first and stops there if it fails.
+
+Read "Known gaps" before doing this on anything that will hold real data.
+
 The passwords are printed once and stored nowhere. Hand each to its owner and
 have them change it after their first sign-in. Re-running is safe: it adds only
 what is missing and never touches an existing user, so a lost password is
@@ -227,6 +245,13 @@ the database from backup only if that combination does not work.
 
 ## Known gaps
 
+- **Production is a public demo (since 2026-10-19).** The demo users exist with
+  `Ashram@2026`, and the login page shows them unconditionally — one click
+  signs anyone in as Admin, with access to every donor record, the ledger, user
+  management and the linked WhatsApp number. **Put no real data in.** Before
+  real use: gate the panel in `LoginPage.tsx` behind a build flag left off in
+  `deploy/prod.env`, deactivate the four demo users (or change their
+  passwords), and bootstrap the real organisation and users.
 - **Uploaded files have no backup yet.** `prod_sspma_data` holds receipts and
   attachments, and the platform backs up PostgreSQL, Redis and Qdrant only. The
   volume carries `com.nirantix.backup=true` so that a volume component in the

@@ -73,6 +73,13 @@ const specSchema = z.object({
         role: z.enum(roleKeys),
         mobile: blank(z.string().trim()),
         designation: blank(z.string().trim()),
+        /**
+         * Omit for a random password, printed once — the normal case. Set only
+         * for a demo, where the login page's demo panel hands out a known one:
+         * a password written in this file is in shell history, backups and
+         * anyone's copy of it.
+         */
+        password: blank(z.string().min(8, 'Passwords are at least 8 characters')),
       }),
     )
     .min(1)
@@ -134,14 +141,16 @@ async function readStdin(): Promise<string> {
 class DryRunRollback extends Error {}
 
 async function bootstrap(prisma: PrismaClient, spec: Spec, dryRun: boolean) {
-  const created: { name: string; email: string; role: string; password: string }[] = [];
+  // `password` is null when it came from the spec: the operator already has
+  // it, and echoing it back would put it in one more log.
+  const created: { name: string; email: string; role: string; password: string | null }[] = [];
   const skipped: string[] = [];
 
   // Hashing is slow on purpose, so it happens before the transaction opens
   // rather than holding it while bcrypt runs.
   const passwords = new Map<string, { plain: string; hash: string }>();
   for (const user of spec.users) {
-    const plain = generatePassword();
+    const plain = user.password ?? generatePassword();
     passwords.set(user.email, { plain, hash: await bcrypt.hash(plain, 10) });
   }
 
@@ -277,7 +286,12 @@ async function bootstrap(prisma: PrismaClient, spec: Spec, dryRun: boolean) {
             passwordHash: password.hash,
           },
         });
-        created.push({ name: user.name, email: user.email, role: user.role, password: password.plain });
+        created.push({
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          password: user.password ? null : password.plain,
+        });
       }
 
       if (dryRun) throw new DryRunRollback();
@@ -327,7 +341,8 @@ async function main() {
       console.log('\nNew users. These passwords are shown ONCE and stored nowhere —');
       console.log('hand each to its owner and have them change it after signing in.\n');
       for (const user of created) {
-        console.log(`  ${user.role.padEnd(16)} ${user.email.padEnd(36)} ${user.password}   ${user.name}`);
+        const shown = user.password ?? '(as set in the spec)';
+        console.log(`  ${user.role.padEnd(16)} ${user.email.padEnd(36)} ${shown}   ${user.name}`);
       }
       console.log('');
     }
