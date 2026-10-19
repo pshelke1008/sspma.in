@@ -1,0 +1,15 @@
+{
+  "organization": {
+    "slug": "ashram-management",
+    "name": "Ashram Management",
+    "legalName": "Shree Seva Ashram Charitable Foundation",
+    "city": "Pune",
+    "state": "Maharashtra"
+  },
+  "users": [
+    { "name": "Ananya Iyer",     "email": "admin@ashram.org",    "role": "ADMIN",           "designation": "Admin User",      "password": "Ashram@2026" },
+    { "name": "Rohit Deshpande", "email": "finance@ashram.org",  "role": "FINANCE_MANAGER", "designation": "Finance Manager", "password": "Ashram@2026" },
+    { "name": "Meera Kulkarni",  "email": "accounts@ashram.org", "role": "ACCOUNTANT",      "designation": "Accountant",      "password": "Ashram@2026" },
+    { "name": "Suresh Nair",     "email": "approver@ashram.org", "role": "APPROVER",        "designation": "Approver",        "password": "Ashram@2026" }
+  ]
+}

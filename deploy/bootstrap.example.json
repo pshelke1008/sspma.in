@@ -1,0 +1,26 @@
+{
+  "organization": {
+    "slug": "sspma",
+    "name": "SSPMA",
+    "legalName": "Full registered name of the trust",
+    "registrationNo": "",
+    "panNumber": "",
+    "email": "office@example.org",
+    "phone": "+91 00000 00000",
+    "addressLine1": "",
+    "city": "",
+    "state": "Maharashtra",
+    "postalCode": ""
+  },
+  "users": [
+    { "name": "Admin Name",      "email": "admin@example.org",    "role": "ADMIN",           "mobile": "9800000001" },
+    { "name": "Finance Name",    "email": "finance@example.org",  "role": "FINANCE_MANAGER", "mobile": "9800000002" },
+    { "name": "Accountant Name", "email": "accounts@example.org", "role": "ACCOUNTANT",      "mobile": "9800000003" },
+    { "name": "Approver Name",   "email": "approver@example.org", "role": "APPROVER",        "mobile": "9800000004" }
+  ],
+  "extraAccounts": [
+    { "code": "1102", "name": "Bank — Second",       "type": "ASSET", "isBankAccount": true },
+    { "code": "3102", "name": "Annadan Fund",        "type": "EQUITY" },
+    { "code": "5106", "name": "Salaries & Honorarium", "type": "EXPENSE" }
+  ]
+}
