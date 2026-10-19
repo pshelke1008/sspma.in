@@ -1,0 +1,19 @@
+# Both images build with the repository root as context (see
+# apps/api/Dockerfile and apps/web/Dockerfile), so this file serves both.
+#
+# node_modules and dist above all: a host-built node_modules carries Windows or
+# x86 binaries (Prisma engines, esbuild) that would shadow the ones `npm ci`
+# installs for linux/arm64 inside the image.
+**/node_modules
+**/dist
+.git
+.github
+.env
+.env.*
+!.env.example
+storage
+coverage
+tests
+apps/api/tests
+**/*.log
+.vite

@@ -1,0 +1,298 @@
+# Build and publish — adapted from the platform template at
+# platform-engineering/docs/templates/application-build.yml.example.
+#
+# Read that file for the WHY of every step; this one records only where it
+# differs, and why.
+#
+# --------------------------------------------------------------------------
+# Differences from the template
+# --------------------------------------------------------------------------
+#
+# 1. TWO images from one repository. The template assumes one Dockerfile at the
+#    root. This is an npm workspaces monorepo, so a matrix builds
+#    apps/api/Dockerfile and apps/web/Dockerfile, both with the repository root
+#    as context. This is a matrix over SERVICES, never over environments — the
+#    template's warning about that still applies in full.
+#
+# 2. prod ONLY. There is no dev environment for sspma yet, so `main` is the only
+#    mapped branch and there is no automatic deploy job. A push to main BUILDS
+#    a prod image; nothing reaches the server until a person runs this workflow
+#    by hand and ticks "deploy".
+#
+#    That is a weaker position than the other apps are in — nothing runs on the
+#    platform before production — and it was chosen knowingly. Adding dev later
+#    is: a `development` branch, a line in the case statement and in
+#    on.push.branches, deploy/dev.env, and the template's `deploy` job.
+#
+# 3. The server unit is `app`, not the service name. Both images run from one
+#    clone at applications/sspma/prod/app/, so the deploy request names that
+#    directory and app-deploy.sh verifies both containers.
+
+name: Build and publish
+
+on:
+  push:
+    # Must agree with the case statement in "Resolve" below.
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '.github/**'
+      - 'tests/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment token"
+        required: true
+        default: prod
+        type: choice
+        options: [prod]
+
+      deploy:
+        description: "Deploy to prod on the server after building. This tick is the approval."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PRODUCT: sspma
+  # The directory under applications/sspma/<env>/ on the server. See (3) above.
+  UNIT: app
+  # The server is an Oracle Ampere A1 (aarch64). See the template.
+  TARGET_PLATFORM: linux/arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      # One image failing must not leave the other half-published and the run
+      # green: deploy-prod needs BOTH, and a matrix that cancels its sibling
+      # makes that failure obvious.
+      fail-fast: true
+      matrix:
+        service: [api, web]
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve environment, version and image
+        id: v
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ inputs.environment }}" ]; then
+            ENVIRONMENT="${{ inputs.environment }}"
+          else
+            case "${{ github.ref_name }}" in
+              main) ENVIRONMENT=prod ;;
+              *)
+                echo "::error::no environment mapped for branch '${{ github.ref_name }}' — add it to the case statement AND to on.push.branches"
+                exit 1
+                ;;
+            esac
+          fi
+
+          case "$ENVIRONMENT" in
+            dev|stage|prod) ;;
+            *) echo "::error::ENVIRONMENT is '$ENVIRONMENT' — must be dev, stage or prod"; exit 1 ;;
+          esac
+
+          VERSION="$(git describe --tags --always)"
+          GIT_SHA="$(git rev-parse HEAD)"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "dev" ]; then
+            echo "::error::git describe produced '$VERSION' — refusing to publish an untraceable image"
+            exit 1
+          fi
+
+          IMAGE="ghcr.io/${{ github.repository_owner }}/${PRODUCT}-${SERVICE}"
+          IMAGE="$(printf '%s' "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+
+          {
+            echo "environment=$ENVIRONMENT"
+            echo "version=$VERSION"
+            echo "git_sha=$GIT_SHA"
+            echo "image=$IMAGE"
+            echo "ref=${IMAGE}:${ENVIRONMENT}-${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+          echo "will publish ${IMAGE}:${ENVIRONMENT}-${VERSION}"
+
+      # Build-time arguments from the committed, non-secret deploy/<env>.env.
+      # Read with grep, never sourced. Only the web image takes any.
+      - name: Load build arguments
+        id: args
+        run: |
+          set -euo pipefail
+          ENV_FILE="deploy/${{ steps.v.outputs.environment }}.env"
+          [ -f "$ENV_FILE" ] || { echo "::error::${ENV_FILE} not found — CI reads build arguments from it"; exit 1; }
+
+          BUILD_ARGS=""
+          if [ "${{ matrix.service }}" = web ]; then
+            value="$(grep -E '^VITE_API_URL=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+            [ -n "$value" ] || { echo "::error::VITE_API_URL is empty in ${ENV_FILE} — the bundle would point at localhost"; exit 1; }
+            BUILD_ARGS="VITE_API_URL=${value}"$'\n'
+            echo "VITE_API_URL=$value"
+          fi
+
+          {
+            echo "build_args<<__EOF__"
+            printf '%s' "$BUILD_ARGS"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ env.TARGET_PLATFORM }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags are immutable. An existing tag means this commit is already
+      # published: skip, do not fail.
+      - name: Refuse to overwrite a published tag
+        id: exists
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "${{ steps.v.outputs.ref }}" >/dev/null 2>&1; then
+            echo "::notice::${{ steps.v.outputs.ref }} is already published — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/build-push-action@v6
+        if: steps.exists.outputs.skip == 'false'
+        with:
+          context: .
+          file: apps/${{ matrix.service }}/Dockerfile
+          platforms: ${{ env.TARGET_PLATFORM }}
+          push: true
+          # Off for retention reasons — see the template.
+          provenance: false
+          sbom: false
+          tags: ${{ steps.v.outputs.ref }}
+          build-args: |
+            VERSION=${{ steps.v.outputs.version }}
+            GIT_SHA=${{ steps.v.outputs.git_sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+            ${{ steps.args.outputs.build_args }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.v.outputs.git_sha }}
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            com.nirantix.product=${{ env.PRODUCT }}
+            com.nirantix.service=${{ matrix.service }}
+            com.nirantix.env=${{ steps.v.outputs.environment }}
+            com.nirantix.team=platform
+          # Scoped per service, or the two matrix legs overwrite each other's
+          # cache and neither ever gets a hit.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      # Asks the registry, not the build: architecture, revision and env label.
+      - name: Verify the published image
+        if: steps.exists.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          image="${{ steps.v.outputs.ref }}"
+          want_arch="${TARGET_PLATFORM#linux/}"
+          docker pull -q --platform "$TARGET_PLATFORM" "$image"
+
+          got_arch="$(docker inspect "$image" --format '{{.Architecture}}')"
+          if [ "$got_arch" != "$want_arch" ]; then
+            echo "::error::image architecture is '$got_arch', expected '$want_arch' — this would not run on the server"
+            exit 1
+          fi
+
+          rev="$(docker inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          env_label="$(docker inspect "$image" --format '{{index .Config.Labels "com.nirantix.env"}}')"
+          if [ "$rev" != "${{ steps.v.outputs.git_sha }}" ]; then
+            echo "::error::revision label is '$rev', expected '${{ steps.v.outputs.git_sha }}'"
+            exit 1
+          fi
+          if [ "$env_label" != "${{ steps.v.outputs.environment }}" ]; then
+            echo "::error::com.nirantix.env is '$env_label', expected '${{ steps.v.outputs.environment }}'"
+            exit 1
+          fi
+          echo "published $image"
+          echo "  revision $rev"
+          echo "  env      $env_label"
+          echo "  arch     $got_arch"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ env.PRODUCT }}-${{ matrix.service }}"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| image | \`${{ steps.v.outputs.ref }}\` |"
+            echo "| environment | ${{ steps.v.outputs.environment }} |"
+            echo "| revision | \`${{ steps.v.outputs.git_sha }}\` |"
+            echo "| already published | ${{ steps.exists.outputs.skip }} |"
+            echo
+            echo "Deploy both images with:"
+            echo '```bash'
+            echo "/opt/platform/scripts/app-deploy.sh --app ${{ env.PRODUCT }} --env ${{ steps.v.outputs.environment }} --service ${{ env.UNIT }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================================
+  # deploy-prod — only when a person asks for it
+  # ==========================================================================
+  #
+  # NEVER runs on a push. Requires workflow_dispatch AND the "deploy" tick,
+  # which defaults to false. `needs: build` waits for BOTH matrix legs, so the
+  # button cannot ship a commit whose second image does not exist.
+  #
+  # Same DEPLOY_SSH_KEY as every other application. The server's forced command
+  # (scripts/app-deploy-ssh.sh) accepts only `deploy <app> <unit> <env>`, and
+  # the environments that key may reach are pinned in authorized_keys.
+  deploy-prod:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Promote to production over SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          for v in DEPLOY_HOST DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            [ -n "${!v}" ] || { echo "::error::secret $v is not set"; exit 1; }
+          done
+
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY"     > ~/.ssh/ci-deploy-prod
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0600 ~/.ssh/ci-deploy-prod
+
+          echo "promoting ${PRODUCT}/prod/${UNIT} — approved by ${{ github.actor }}"
+          ssh -i ~/.ssh/ci-deploy-prod \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=15 \
+              -o ServerAliveInterval=30 \
+              deploy@"$DEPLOY_HOST" "deploy ${PRODUCT} ${UNIT} prod"
+
+      - name: Remove the key
+        if: always()
+        run: shred -u ~/.ssh/ci-deploy-prod 2>/dev/null || rm -f ~/.ssh/ci-deploy-prod
