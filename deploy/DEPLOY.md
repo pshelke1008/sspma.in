@@ -150,8 +150,47 @@ which creates the schema.
 demo organisations with fictional donors, donations and bank accounts, and four
 users per organisation sharing one hard-coded password printed in its output.
 
-There is no sign-up route, so a fresh production database has no way in until
-a first organisation and admin are created. See "Known gaps".
+There is no sign-up route. The first organisation and its users come from
+`apps/api/src/scripts/bootstrap-org.ts`, which ships in the API image and runs
+against the production database from inside it.
+
+Write the spec on the server, **outside the clone** so `git status` stays
+clean and nobody's details get committed:
+
+```bash
+cd /opt/platform/applications/sspma/prod/app
+install -m 0600 deploy/bootstrap.example.json ~/sspma-bootstrap.json
+nano ~/sspma-bootstrap.json          # real organisation, real names and emails
+```
+
+- `users` needs at least one `ADMIN`. Roles are `ADMIN`, `FINANCE_MANAGER`,
+  `ACCOUNTANT`, `APPROVER`.
+- Leave any field blank (`""`) that you do not have; it is stored as absent.
+- `extraAccounts` is optional — funds, a second bank, expense heads. The
+  script always creates the minimum chart the app needs, including the six
+  codes it looks up by number (`1101`, `1103`, `2100`, `4101`, `4199`,
+  `5199`). Without those, donations save but **post nothing to the ledger, with
+  no error**. Everything else can be added later in the app.
+
+Dry run first — every write is made against the real database and then rolled
+back:
+
+```bash
+VERSION="$(git describe --tags --always)"; export VERSION
+run_bootstrap() {
+  docker compose --env-file deploy/prod.env -f deploy/compose.yaml \
+    run --rm -T --no-deps --label traefik.enable=false \
+    api node apps/api/dist/scripts/bootstrap-org.js "$@" < ~/sspma-bootstrap.json
+}
+run_bootstrap --dry-run
+run_bootstrap                         # for real: prints each new password ONCE
+shred -u ~/sspma-bootstrap.json
+```
+
+The passwords are printed once and stored nowhere. Hand each to its owner and
+have them change it after their first sign-in. Re-running is safe: it adds only
+what is missing and never touches an existing user, so a lost password is
+reset by an admin in the app, not by running this again.
 
 ---
 
@@ -188,7 +227,6 @@ the database from backup only if that combination does not work.
 
 ## Known gaps
 
-- **No first-admin path for production.** See step 5.
 - **Uploaded files have no backup yet.** `prod_sspma_data` holds receipts and
   attachments, and the platform backs up PostgreSQL, Redis and Qdrant only. The
   volume carries `com.nirantix.backup=true` so that a volume component in the
